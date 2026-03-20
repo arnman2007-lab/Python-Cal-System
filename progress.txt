@@ -40,6 +40,209 @@
   - Status bar has db_status_label and workstation_label permanent widgets
 ---
 
+## 2026-03-20 - US-002
+- What was implemented:
+  - Added automatic database table creation on successful connection
+  - app.py _load_settings_and_connect() now calls db.create_tables() after successful connect
+  - Tables use SQLAlchemy Base.metadata.create_all() to create all 11 tables
+  - Error handling logs warnings but doesn't block startup (tables may already exist)
+- Files changed:
+  - src/calsystem/app.py (modified _load_settings_and_connect method)
+- **Learnings for future iterations:**
+  - create_tables() uses SQLAlchemy's create_all() which is idempotent (safe to call multiple times)
+  - Table creation warnings are logged but not shown as error boxes to avoid startup annoyance
+  - The 11 tables: standards, workstation_configs, workstation_standards, duts, procedures, test_sections, test_points, wiring_diagrams, command_banks, calibration_sessions, test_results
+---
+
+## 2026-03-20 - US-003
+- What was implemented:
+  - Created ScanWorker QThread class to run VISA scanning in background
+  - Updated _on_scan() to check PYVISA_AVAILABLE and show warning if not installed
+  - Connected ScanWorker.finished signal to _on_scan_finished() to populate detected_table
+  - Connected ScanWorker.error signal to _on_scan_error() for error handling
+  - Button shows "Scanning..." during scan, "Found X instruments" on completion
+  - Results include Address, Manufacturer, Model, Serial, Status columns
+- Files changed:
+  - src/calsystem/ui/workstation/workstation_tab.py (modified)
+- **Learnings for future iterations:**
+  - Use QThread subclass with pyqtSignal for background tasks in PyQt6
+  - Import PYVISA_AVAILABLE from visa_manager to check if PyVISA is installed
+  - InstrumentInfo dataclass holds scan results (address, manufacturer, model, serial_number, is_connected, error)
+  - Use QTimer.singleShot() for delayed UI updates
+---
+
+## 2026-03-20 - US-004
+- What was implemented:
+  - Created AddStandardDialog (src/calsystem/ui/dialogs/add_standard_dialog.py)
+  - Dialog has fields: Make, Model, Serial, STD ID, Address, Device Group dropdown
+  - Group dropdown maps to DeviceGroupType enum (Calibrator, DMM, Counter, Other)
+  - Dialog can be pre-populated from detected instrument scan results
+  - Save creates Standard record if new, reuses if make/model/serial exists
+  - Also creates WorkstationStandard association for current workstation
+  - Connected to _on_add_detected() and _on_add_manual() in workstation_tab.py
+- Files changed:
+  - src/calsystem/ui/dialogs/add_standard_dialog.py (new)
+  - src/calsystem/ui/dialogs/__init__.py (modified)
+  - src/calsystem/ui/workstation/workstation_tab.py (modified)
+- **Learnings for future iterations:**
+  - Use session.flush() after add() to get the new record's ID before commit
+  - DeviceGroupType enum values are lowercase strings (calibrator, dmm, counter, other)
+  - WorkstationConfig.name defaults to "Default Workstation" if settings.workstation_name is empty
+  - Check for existing records before creating duplicates (Standard by make/model/serial)
+---
+
+## 2026-03-20 - US-005
+- What was implemented:
+  - Added showEvent() to WorkstationTab to refresh standards when tab becomes visible
+  - _refresh_standards_table() queries Standard JOIN WorkstationStandard for current workstation
+  - _populate_standards_table() filters data by device_group based on filter dropdown
+  - Group filter connected to _on_filter_changed() which re-populates table
+  - Remove button deletes WorkstationStandard association, keeps Standard record intact
+  - WorkstationStandard ID stored in table item's UserRole data for later deletion
+- Files changed:
+  - src/calsystem/ui/workstation/workstation_tab.py (modified)
+- **Learnings for future iterations:**
+  - Use showEvent() to refresh data when QWidget/tab becomes visible
+  - Store metadata in QTableWidgetItem.setData(Qt.ItemDataRole.UserRole, value)
+  - DeviceGroupType enum value is lowercase (calibrator, not Calibrator)
+  - Filter logic: cache _standards_data, filter in _populate_standards_table()
+---
+
+## 2026-03-20 - US-006
+- What was implemented:
+  - _load_config_dropdown() loads WorkstationConfig names into config_combo
+  - _on_save_config() prompts for name, saves/overwrites WorkstationConfig with standards
+  - _on_load_config() loads selected config and updates workstation_name in settings
+  - VISA address validation: compares stored addresses against visa_manager.scan()
+  - Shows warning if addresses not available (instruments disconnected)
+  - Updates config.json with workstation_name on save/load
+- Files changed:
+  - src/calsystem/ui/workstation/workstation_tab.py (modified)
+- **Learnings for future iterations:**
+  - Use QInputDialog.getText() for simple text prompts
+  - Save workstation_name to config.json so it persists across sessions
+  - Use reload_settings() to refresh cached settings after config changes
+  - VISA address validation should warn but not block loading
+---
+
+## 2026-03-20 - US-007
+- What was implemented:
+  - DUTTab form with auto-generating asset number (Model-SerialNumber format)
+  - Manual override checkbox toggles asset input editability
+  - Remote Capable checkbox shows/hides Input Method dropdown
+  - _on_add_dut() clears form and resets all fields for new entry
+  - _on_save() creates/updates DUT record in database with all fields
+  - Input method maps to InputMethod enum (KEYBOARD, REMOTE, WEBCAM)
+  - OCR mode stored as string (standard, seven_segment)
+- Files changed:
+  - src/calsystem/ui/dut/dut_tab.py (modified)
+- **Learnings for future iterations:**
+  - Use textChanged signal to auto-update dependent fields
+  - Store current record ID (_current_dut_id) to distinguish new vs edit
+  - QFormLayout.ItemRole.LabelRole to access row labels for visibility toggle
+  - Convert QDate to datetime: datetime(qdate.year(), qdate.month(), qdate.day())
+---
+
+## 2026-03-20 - US-008
+- What was implemented:
+  - DUT search with LIKE partial matching on asset_number, make, model, serial_number
+  - Search filters dut_table as user types (textChanged signal)
+  - Double-click on DUT loads details into form (_on_dut_double_clicked)
+  - _load_dut_details populates all form fields from database
+  - showEvent refreshes both due_table and dut_table
+- Files changed:
+  - src/calsystem/ui/dut/dut_tab.py (modified)
+---
+
+## 2026-03-20 - US-009
+- What was implemented:
+  - Due date auto-calculates when interval or last_cal_date changes
+  - due_table refreshes with DUTs sorted by next_due_date
+  - Filter dropdown: Overdue, Due This Week, Due This Month, All
+  - Color coding: Red=overdue, Yellow=within 7 days, Green=more than 7 days
+  - Uses Qt.GlobalColor for text coloring
+- Files changed:
+  - src/calsystem/ui/dut/dut_tab.py (modified)
+---
+
+## 2026-03-20 - US-010
+- What was implemented:
+  - CommandBankDialog with split view: list on left, editor on right
+  - Bank list with filtering by make/model
+  - Command editor with editable table rows
+  - Default commands: *IDN?, *RST, *CLS, *OPC?, OPER, STBY
+  - CRUD operations: New, Delete, Save
+  - Commands stored as JSON in CommandBank.commands field
+  - Connected to workstation_tab _on_command_bank method
+- Files changed:
+  - src/calsystem/ui/dialogs/command_bank_dialog.py (new)
+  - src/calsystem/ui/dialogs/__init__.py (modified)
+  - src/calsystem/ui/workstation/workstation_tab.py (modified)
+- **Learnings for future iterations:**
+  - Store commands as Dict[str, str] in JSON column
+  - Use QTableWidget for editable lists with add/remove
+  - Pre-populate with defaults using "Add Defaults" button
+---
+
+## 2026-03-20 - US-011
+- What was implemented:
+  - Check for CommandBank existence when loading standards
+  - Show warning icon (⚠) in Status column if no command bank
+  - Tooltip explains "No command bank for [Make Model]"
+  - Right-click context menu on standards table
+  - "Create Command Bank..." option opens pre-filled dialog
+  - Refreshes after creating command bank to update status
+- Files changed:
+  - src/calsystem/ui/workstation/workstation_tab.py (modified)
+---
+
+## 2026-03-20 - US-012
+- What was implemented:
+  - Procedure CRUD: New clears form, Save creates/updates record
+  - procedure_list table loads from database on showEvent
+  - Selecting procedure loads name, target_make, target_model into form
+  - structure_tree populated with sections and test points
+  - _load_procedure retrieves sections and test_points relationships
+- Files changed:
+  - src/calsystem/ui/procedures/procedures_tab.py (modified)
+- **Learnings for future iterations:**
+  - Use QTreeWidgetItem.setData() to store (type, id) tuples for later reference
+  - Procedure.sections relationship auto-loads ordered by TestSection.order
+  - expandAll() makes tree fully visible after loading
+---
+
+## 2026-03-20 - US-013
+- What was implemented:
+  - Add Section button creates TestSection in database linked to current procedure
+  - Section appears as top-level item in structure_tree QTreeWidget
+  - Section name is editable inline via itemChanged signal
+  - Move Up/Down buttons reorder sections with _update_section_order()
+  - Remove button deletes TestSection and cascades to child TestPoints
+- Files changed:
+  - src/calsystem/ui/procedures/procedures_tab.py (modified)
+- **Learnings for future iterations:**
+  - Use ItemIsEditable flag on QTreeWidgetItem for inline editing
+  - Connect itemChanged signal to save edits to database
+  - Store (type, id) tuple in UserRole data for distinguishing sections vs test points
+  - Use session.delete() with cascade for parent-child relationships
+---
+
+## 2026-03-20 - US-014
+- What was implemented:
+  - Add Test Point button creates TestPoint under selected section
+  - Test point appears as child item in structure_tree under its section
+  - Selecting test point loads details into right panel form via _load_testpoint_details()
+  - Form fields: Test Type, Nominal, Unit, Frequency, Tolerance, Tolerance Type
+  - Save Test Point button persists form to database via _save_current_testpoint()
+  - Tree displays: test point description, nominal value, tolerance
+- Files changed:
+  - src/calsystem/ui/procedures/procedures_tab.py (modified)
+- **Learnings for future iterations:**
+  - TestPointType and ToleranceType are enums - use .value for database, enum() for assignment
+  - Move up/down for test points uses parent.takeChild() and parent.insertChild()
+  - _update_testpoint_order() saves new order values for all children of a section
+---
+
 ## Notes
 
 - Project skeleton already exists with PyQt6 UI, database models, and module structure
@@ -48,4 +251,57 @@
 - VISAManager and CommandBankManager exist but need UI integration
 - OCR module has WebcamCapture and OCRReader classes ready
 
+---
+
+## 2026-03-20 - US-015
+- What was implemented:
+  - Command template dropdown loads from CommandBank table
+  - _load_command_templates() populates dropdown with make/model pairs
+  - _on_template_selected() auto-fills source, operate, measure commands
+  - Placeholder help text: "Use {value}, {unit}, {frequency} as placeholders"
+- Files changed:
+  - src/calsystem/ui/procedures/procedures_tab.py (modified)
+---
+
+## 2026-03-20 - US-016
+- What was implemented:
+  - ExcelImportDialog 3-step wizard for importing procedures from Excel
+  - Step 1: Select sheet from workbook
+  - Step 2: Map columns to fields (section, description, nominal, unit, tolerance)
+  - Step 3: Preview imported data before confirming
+  - Creates TestSections and TestPoints from mapped data
+- Files changed:
+  - src/calsystem/ui/dialogs/excel_import_dialog.py (new)
+  - src/calsystem/ui/dialogs/__init__.py (modified)
+  - src/calsystem/ui/procedures/procedures_tab.py (modified)
+- **Learnings for future iterations:**
+  - openpyxl required for Excel import, check OPENPYXL_AVAILABLE before using
+  - Use read_only=True and data_only=True for faster workbook loading
+  - Group imported rows by section name before creating TestSection records
+---
+
+## 2026-03-20 - US-017
+- What was implemented:
+  - _load_procedures() loads all Procedures into procedure_combo
+  - Matching procedures (by target_make/model) listed first with separator
+  - Selection saved to DUT.default_procedure_id on save
+  - _load_dut_details() selects assigned procedure
+- Files changed:
+  - src/calsystem/ui/dut/dut_tab.py (modified)
+---
+
+## 2026-03-20 - US-018 & US-019
+- What was implemented:
+  - ExecutionTab showEvent loads DUTs and Procedures into combos
+  - _on_dut_selected() auto-selects assigned procedure and input method
+  - Start Session creates CalibrationSession with status=in_progress
+  - _load_test_points() queries procedure sections and test points
+  - Populates testpoints_table with #, Section/Test, Nominal, Measured, Status
+  - _update_current_display() shows nominal, tolerance, section info
+- Files changed:
+  - src/calsystem/ui/execution/execution_tab.py (modified)
+- **Learnings for future iterations:**
+  - Store test point data in _test_points list for quick access during execution
+  - CalibrationSession status uses SessionStatus enum (in_progress, paused, completed, aborted)
+  - Load procedures via procedure.sections relationship which auto-loads test_points
 ---

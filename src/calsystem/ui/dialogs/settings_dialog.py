@@ -18,6 +18,9 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QDialogButtonBox,
     QLabel,
+    QComboBox,
+    QFileDialog,
+    QWidget,
 )
 from PyQt6.QtCore import Qt
 from loguru import logger
@@ -46,26 +49,54 @@ class SettingsDialog(QDialog):
         db_group = QGroupBox("Database Connection")
         db_layout = QFormLayout()
 
+        # Database type selector
+        self.db_type_combo = QComboBox()
+        self.db_type_combo.addItem("SQLite (Local File)", "sqlite")
+        self.db_type_combo.addItem("MySQL/MariaDB (Server)", "mysql")
+        self.db_type_combo.currentIndexChanged.connect(self._on_db_type_changed)
+        db_layout.addRow("Database Type:", self.db_type_combo)
+
+        # SQLite settings (shown by default)
+        self.sqlite_widget = QWidget()
+        sqlite_layout = QHBoxLayout(self.sqlite_widget)
+        sqlite_layout.setContentsMargins(0, 0, 0, 0)
+        self.sqlite_path_input = QLineEdit()
+        self.sqlite_path_input.setPlaceholderText("Default: ~/.calsystem/calsystem.db")
+        self.sqlite_path_input.setReadOnly(True)
+        sqlite_layout.addWidget(self.sqlite_path_input)
+        self.sqlite_browse_btn = QPushButton("Browse...")
+        self.sqlite_browse_btn.clicked.connect(self._on_browse_sqlite)
+        sqlite_layout.addWidget(self.sqlite_browse_btn)
+        db_layout.addRow("Database File:", self.sqlite_widget)
+
+        # MySQL settings (hidden by default)
+        self.mysql_widget = QWidget()
+        mysql_layout = QFormLayout(self.mysql_widget)
+        mysql_layout.setContentsMargins(0, 0, 0, 0)
+
         self.host_input = QLineEdit()
         self.host_input.setPlaceholderText("localhost")
-        db_layout.addRow("Host:", self.host_input)
+        mysql_layout.addRow("Host:", self.host_input)
 
         self.port_input = QSpinBox()
         self.port_input.setRange(1, 65535)
         self.port_input.setValue(3306)
-        db_layout.addRow("Port:", self.port_input)
+        mysql_layout.addRow("Port:", self.port_input)
 
         self.username_input = QLineEdit()
         self.username_input.setPlaceholderText("calsystem")
-        db_layout.addRow("Username:", self.username_input)
+        mysql_layout.addRow("Username:", self.username_input)
 
         self.password_input = QLineEdit()
         self.password_input.setEchoMode(QLineEdit.EchoMode.Password)
-        db_layout.addRow("Password:", self.password_input)
+        mysql_layout.addRow("Password:", self.password_input)
 
         self.database_input = QLineEdit()
         self.database_input.setPlaceholderText("calsystem")
-        db_layout.addRow("Database Name:", self.database_input)
+        mysql_layout.addRow("Database Name:", self.database_input)
+
+        db_layout.addRow(self.mysql_widget)
+        self.mysql_widget.setVisible(False)
 
         db_group.setLayout(db_layout)
         layout.addWidget(db_group)
@@ -94,10 +125,47 @@ class SettingsDialog(QDialog):
         button_box.rejected.connect(self.reject)
         layout.addWidget(button_box)
 
+    def _on_db_type_changed(self, index: int):
+        """Handle database type selection change."""
+        db_type = self.db_type_combo.currentData()
+        self.sqlite_widget.setVisible(db_type == "sqlite")
+        self.mysql_widget.setVisible(db_type == "mysql")
+
+    def _on_browse_sqlite(self):
+        """Browse for SQLite database file."""
+        settings = get_settings()
+        default_path = str(settings.config_dir / "calsystem.db")
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Select Database File",
+            default_path,
+            "SQLite Database (*.db);;All Files (*)",
+        )
+        if file_path:
+            self.sqlite_path_input.setText(file_path)
+
     def _load_current_settings(self):
         """Load current settings into the dialog fields."""
         settings = get_settings()
 
+        # Set database type
+        db_type = settings.database.db_type
+        index = self.db_type_combo.findData(db_type)
+        if index >= 0:
+            self.db_type_combo.setCurrentIndex(index)
+        self._on_db_type_changed(self.db_type_combo.currentIndex())
+
+        # SQLite settings
+        if settings.database.sqlite_path:
+            self.sqlite_path_input.setText(settings.database.sqlite_path)
+        else:
+            self.sqlite_path_input.setText("")
+            self.sqlite_path_input.setPlaceholderText(
+                f"Default: {settings.config_dir / 'calsystem.db'}"
+            )
+
+        # MySQL settings
         self.host_input.setText(settings.database.host)
         self.port_input.setValue(settings.database.port)
         self.username_input.setText(settings.database.username)
@@ -106,13 +174,21 @@ class SettingsDialog(QDialog):
 
     def _get_connection_string(self) -> str:
         """Build connection string from current field values."""
-        host = self.host_input.text() or "localhost"
-        port = self.port_input.value()
-        username = self.username_input.text() or "calsystem"
-        password = self.password_input.text()
-        database = self.database_input.text() or "calsystem"
+        db_type = self.db_type_combo.currentData()
 
-        return f"mysql+mysqlconnector://{username}:{password}@{host}:{port}/{database}"
+        if db_type == "sqlite":
+            sqlite_path = self.sqlite_path_input.text()
+            if not sqlite_path:
+                settings = get_settings()
+                sqlite_path = str(settings.config_dir / "calsystem.db")
+            return f"sqlite:///{sqlite_path}"
+        else:
+            host = self.host_input.text() or "localhost"
+            port = self.port_input.value()
+            username = self.username_input.text() or "calsystem"
+            password = self.password_input.text()
+            database = self.database_input.text() or "calsystem"
+            return f"mysql+mysqlconnector://{username}:{password}@{host}:{port}/{database}"
 
     def _on_test_connection(self):
         """Test the database connection with current settings."""
@@ -171,7 +247,12 @@ class SettingsDialog(QDialog):
                     config_data = {}
 
             # Update database settings
+            db_type = self.db_type_combo.currentData()
+            sqlite_path = self.sqlite_path_input.text() or None
+
             config_data["database"] = {
+                "db_type": db_type,
+                "sqlite_path": sqlite_path,
                 "host": self.host_input.text() or "localhost",
                 "port": self.port_input.value(),
                 "username": self.username_input.text() or "calsystem",
@@ -189,10 +270,11 @@ class SettingsDialog(QDialog):
             # Reload settings to apply changes
             reload_settings()
 
+            db_desc = "SQLite (local file)" if db_type == "sqlite" else "MySQL/MariaDB"
             QMessageBox.information(
                 self,
                 "Settings Saved",
-                f"Settings have been saved to:\n{config_file}",
+                f"Settings saved.\nDatabase type: {db_desc}",
             )
             self.accept()
 

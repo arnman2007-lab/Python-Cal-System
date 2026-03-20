@@ -52,6 +52,12 @@ class CalsystemApp(QMainWindow):
             db = get_db()
             try:
                 if db.connect():
+                    # Create tables on successful connection
+                    try:
+                        db.create_tables()
+                        logger.info("Database tables created/verified")
+                    except Exception as e:
+                        logger.warning(f"Table creation warning: {e}")
                     self._update_db_status(True)
                 else:
                     self._update_db_status(False)

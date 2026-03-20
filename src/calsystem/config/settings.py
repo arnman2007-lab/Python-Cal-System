@@ -15,22 +15,43 @@ from loguru import logger
 class DatabaseSettings(BaseSettings):
     """Database connection settings."""
 
+    # Database type: "sqlite" (default, file-based) or "mysql" (server-based)
+    db_type: str = "sqlite"
+
+    # SQLite settings
+    sqlite_path: Optional[str] = None  # None = use default in config_dir
+
+    # MySQL settings (only used if db_type="mysql")
     host: str = "localhost"
     port: int = 3306
     username: str = "calsystem"
     password: str = ""
     database: str = "calsystem"
 
+    def get_connection_string(self, config_dir: Optional[Path] = None) -> str:
+        """Get SQLAlchemy connection string."""
+        if self.db_type == "sqlite":
+            if self.sqlite_path:
+                db_path = Path(self.sqlite_path)
+            else:
+                # Default to config_dir/calsystem.db
+                if config_dir is None:
+                    config_dir = Path.home() / ".calsystem"
+                db_path = config_dir / "calsystem.db"
+            return f"sqlite:///{db_path}"
+        else:
+            return f"mysql+mysqlconnector://{self.username}:{self.password}@{self.host}:{self.port}/{self.database}"
+
     @property
     def connection_string(self) -> str:
-        """Get SQLAlchemy connection string."""
-        return f"mysql+mysqlconnector://{self.username}:{self.password}@{self.host}:{self.port}/{self.database}"
+        """Get SQLAlchemy connection string (for backward compatibility)."""
+        return self.get_connection_string()
 
 
 class InstrumentSettings(BaseSettings):
     """Instrument communication settings."""
 
-    visa_backend: str = "@ni"  # Use NI-VISA backend
+    visa_backend: str = ""  # Auto-detect VISA backend (NI-VISA, Keysight, etc.)
     default_timeout_ms: int = 5000
     idn_timeout_ms: int = 2000
     auto_detect_on_startup: bool = False

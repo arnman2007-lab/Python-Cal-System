@@ -69,6 +69,15 @@ class TestStatus(PyEnum):
     SKIPPED = "skipped"
 
 
+class SessionStatus(PyEnum):
+    """Calibration session status."""
+
+    IN_PROGRESS = "in_progress"
+    PAUSED = "paused"
+    COMPLETED = "completed"
+    ABORTED = "aborted"
+
+
 # =============================================================================
 # Standards / Workstation Models
 # =============================================================================
@@ -82,7 +91,7 @@ class Standard(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     make = Column(String(100), nullable=False)
     model = Column(String(100), nullable=False)
-    serial_number = Column(String(100), nullable=False)
+    serial_number = Column(String(100), nullable=True)
     std_id = Column(String(50), nullable=True, comment="Standard ID for tracking")
     device_group = Column(Enum(DeviceGroupType), default=DeviceGroupType.OTHER)
     visa_address = Column(String(200), nullable=True, comment="GPIB/COM/USB address")

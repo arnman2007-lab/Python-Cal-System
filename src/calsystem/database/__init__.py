@@ -4,7 +4,7 @@ from calsystem.database.connection import DatabaseManager, get_db
 from calsystem.database.models import (
     Base,
     Standard,
-    DeviceGroup,
+    DeviceGroupType,
     DUT,
     Procedure,
     TestSection,
@@ -20,7 +20,7 @@ __all__ = [
     "get_db",
     "Base",
     "Standard",
-    "DeviceGroup",
+    "DeviceGroupType",
     "DUT",
     "Procedure",
     "TestSection",

@@ -17,7 +17,7 @@
       ],
       "priority": 1,
       "passes": true,
-      "notes": ""
+      "notes": "Implemented by Ralph - Settings dialog with test connection"
     },
     {
       "id": "US-002",
@@ -31,8 +31,8 @@
         "Typecheck passes"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented - app.py calls db.create_tables() on successful connection in _load_settings_and_connect()"
     },
     {
       "id": "US-003",
@@ -47,8 +47,8 @@
         "Typecheck passes"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented - ScanWorker QThread calls VISAManager.scan_and_identify(), populates detected_table"
     },
     {
       "id": "US-004",
@@ -63,8 +63,8 @@
         "Typecheck passes"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented - AddStandardDialog creates Standard and WorkstationStandard records"
     },
     {
       "id": "US-005",
@@ -79,8 +79,8 @@
         "Typecheck passes"
       ],
       "priority": 5,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented - showEvent triggers refresh, filters work, remove deletes association only"
     },
     {
       "id": "US-006",
@@ -95,8 +95,8 @@
         "Typecheck passes"
       ],
       "priority": 6,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented - Save/Load configs with VISA address validation"
     },
     {
       "id": "US-007",
@@ -112,8 +112,8 @@
         "Typecheck passes"
       ],
       "priority": 7,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented - Auto-generate asset number, manual override, remote capable toggle, database save"
     },
     {
       "id": "US-008",
@@ -128,8 +128,8 @@
         "Typecheck passes"
       ],
       "priority": 8,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented - Search with ilike, double-click loads details, showEvent refreshes"
     },
     {
       "id": "US-009",
@@ -144,8 +144,8 @@
         "Typecheck passes"
       ],
       "priority": 9,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented - Auto-calc due date, due_table with filter and color coding"
     },
     {
       "id": "US-010",
@@ -161,8 +161,8 @@
         "Typecheck passes"
       ],
       "priority": 10,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented - Full CommandBankDialog with CRUD, defaults, and filtering"
     },
     {
       "id": "US-011",
@@ -177,8 +177,8 @@
         "Typecheck passes"
       ],
       "priority": 11,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented - Warning icon, tooltip, context menu with Create Command Bank option"
     },
     {
       "id": "US-012",
@@ -192,9 +192,9 @@
         "name_input, target_make_input, target_model_input populate from selected procedure",
         "Typecheck passes"
       ],
-      "priority": 12,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented - New/Save procedure, list refresh, load into builder",
+      "priority": 12
     },
     {
       "id": "US-013",
@@ -209,8 +209,8 @@
         "Typecheck passes"
       ],
       "priority": 13,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented - Add Section creates TestSection, inline editing, move up/down, Remove button with cascade delete"
     },
     {
       "id": "US-014",
@@ -226,8 +226,8 @@
         "Typecheck passes"
       ],
       "priority": 14,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented - Add Test Point, selection loads form, Save Test Point button persists changes"
     },
     {
       "id": "US-015",
@@ -241,8 +241,8 @@
         "Typecheck passes"
       ],
       "priority": 15,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented - Command template dropdown, placeholder help text, auto-populate from CommandBank"
     },
     {
       "id": "US-016",
@@ -257,8 +257,8 @@
         "Typecheck passes"
       ],
       "priority": 16,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented - ExcelImportDialog with 3-step wizard, creates sections and test points"
     },
     {
       "id": "US-017",
@@ -272,8 +272,8 @@
         "Typecheck passes"
       ],
       "priority": 17,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented - _load_procedures() groups matching vs other, saves default_procedure_id"
     },
     {
       "id": "US-018",
@@ -289,8 +289,8 @@
         "Typecheck passes"
       ],
       "priority": 18,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented - showEvent loads DUTs/procedures, CalibrationSession created on start"
     },
     {
       "id": "US-019",
@@ -305,8 +305,8 @@
         "Typecheck passes"
       ],
       "priority": 19,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented - _load_test_points() loads from procedure, _update_current_display() shows details"
     },
     {
       "id": "US-020",
@@ -323,8 +323,8 @@
         "Typecheck passes"
       ],
       "priority": 20,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented - _process_reading calculates pass/fail, _save_test_result creates TestResult"
     },
     {
       "id": "US-021",
@@ -340,8 +340,8 @@
         "Typecheck passes"
       ],
       "priority": 21,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented - tolerance calculation for percent, absolute, and ppm types"
     },
     {
       "id": "US-022",
@@ -357,8 +357,8 @@
         "Typecheck passes"
       ],
       "priority": 22,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented - _show_fail_dialog with Retry/Ignore/Abort options"
     },
     {
       "id": "US-023",
@@ -373,8 +373,8 @@
         "Typecheck passes"
       ],
       "priority": 23,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented - _advance_to_next, _session_complete with overall result calculation"
     },
     {
       "id": "US-024",
@@ -388,8 +388,8 @@
         "Typecheck passes"
       ],
       "priority": 24,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented - _pause_session/_resume_session update database status"
     },
     {
       "id": "US-025",
@@ -405,8 +405,8 @@
         "Typecheck passes"
       ],
       "priority": 25,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented - _on_stop marks session as aborted, resets UI"
     },
     {
       "id": "US-026",
@@ -421,8 +421,8 @@
         "Typecheck passes"
       ],
       "priority": 26,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented - _on_redo clears result and re-enables entry"
     },
     {
       "id": "US-027",
@@ -438,8 +438,8 @@
         "Typecheck passes"
       ],
       "priority": 27,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented - _on_get_remote_reading with VISAManager integration"
     },
     {
       "id": "US-028",
@@ -455,8 +455,8 @@
         "Typecheck passes"
       ],
       "priority": 28,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented - _on_capture_ocr with live preview dialog and capture"
     },
     {
       "id": "US-029",
@@ -471,8 +471,8 @@
         "Typecheck passes"
       ],
       "priority": 29,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented - _process_ocr_image with OCRReader/SevenSegmentReader"
     },
     {
       "id": "US-030",
@@ -487,8 +487,8 @@
         "Typecheck passes"
       ],
       "priority": 30,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented - _on_search with filters, color coding, session selection"
     },
     {
       "id": "US-031",
@@ -502,8 +502,8 @@
         "Typecheck passes"
       ],
       "priority": 31,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented - _load_session_details and _load_test_results"
     },
     {
       "id": "US-032",
@@ -518,8 +518,8 @@
         "Typecheck passes"
       ],
       "priority": 32,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented - _generate_pdf_report with reportlab"
     },
     {
       "id": "US-033",
@@ -535,8 +535,8 @@
         "Typecheck passes"
       ],
       "priority": 33,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented - _export_to_excel with openpyxl"
     },
     {
       "id": "US-034",
@@ -550,8 +550,8 @@
         "Typecheck passes"
       ],
       "priority": 34,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented - _load_calibration_history populates history_table"
     },
     {
       "id": "US-035",
@@ -564,8 +564,8 @@
         "Typecheck passes"
       ],
       "priority": 35,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented - _complete_session updates DUT dates on Pass"
     },
     {
       "id": "US-036",
@@ -580,8 +580,8 @@
         "Typecheck passes"
       ],
       "priority": 36,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented - PreferencesDialog with General, Webcam, Display tabs"
     },
     {
       "id": "US-037",
@@ -596,8 +596,8 @@
         "Typecheck passes"
       ],
       "priority": 37,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented - LogViewerDialog with level filtering and export"
     },
     {
       "id": "US-038",
@@ -612,8 +612,8 @@
         "Typecheck passes"
       ],
       "priority": 38,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented - _on_add_wiring saves image to WiringDiagram table"
     }
   ]
 }

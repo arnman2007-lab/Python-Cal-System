@@ -106,7 +106,7 @@ class VISAManager:
 
     def identify(self, address: str) -> InstrumentInfo:
         """
-        Query instrument identification (*IDN?).
+        Query instrument identification (*IDN? or ID? for older instruments).
 
         Args:
             address: VISA resource address.
@@ -121,26 +121,70 @@ class VISAManager:
                 info.error = "VISA not initialized"
                 return info
 
+        # ID commands to try (in order)
+        id_commands = ["*IDN?", "ID?", "OPT?"]
+
         try:
             timeout = self._settings.instruments.idn_timeout_ms
 
             inst = self._rm.open_resource(address)
             inst.timeout = timeout
 
-            # Query *IDN?
-            response = inst.query("*IDN?").strip()
+            response = None
+            used_command = None
+
+            # Try each ID command until one works
+            for cmd in id_commands:
+                try:
+                    # HP 3458A and similar older HP instruments need setup commands
+                    if cmd == "ID?":
+                        try:
+                            inst.write("RESET")
+                            inst.write("END ALWAYS")
+                        except Exception:
+                            pass  # Continue anyway if setup fails
+
+                    response = inst.query(cmd).strip()
+                    if response:
+                        used_command = cmd
+                        logger.debug(f"{address} responded to {cmd}: {response}")
+                        break
+                except Exception:
+                    continue
+
             inst.close()
 
-            # Parse response (format: Manufacturer,Model,Serial,Firmware)
-            parts = response.split(",")
-            if len(parts) >= 1:
-                info.manufacturer = parts[0].strip()
-            if len(parts) >= 2:
-                info.model = parts[1].strip()
-            if len(parts) >= 3:
-                info.serial_number = parts[2].strip()
-            if len(parts) >= 4:
-                info.firmware = parts[3].strip()
+            if not response:
+                info.error = "No response to ID commands"
+                return info
+
+            # Parse response based on format
+            if used_command == "*IDN?":
+                # Standard format: Manufacturer,Model,Serial,Firmware
+                parts = response.split(",")
+                if len(parts) >= 1:
+                    info.manufacturer = parts[0].strip()
+                if len(parts) >= 2:
+                    info.model = parts[1].strip()
+                if len(parts) >= 3:
+                    info.serial_number = parts[2].strip()
+                if len(parts) >= 4:
+                    info.firmware = parts[3].strip()
+            elif used_command == "ID?":
+                # HP/Agilent older format: usually just "HP3458A" or similar
+                # Try to parse manufacturer and model
+                response_upper = response.upper()
+                if response_upper.startswith("HP"):
+                    info.manufacturer = "HEWLETT-PACKARD"
+                    info.model = response.strip()
+                elif response_upper.startswith("AGILENT"):
+                    info.manufacturer = "AGILENT"
+                    info.model = response.replace("AGILENT", "").strip()
+                else:
+                    info.model = response.strip()
+            else:
+                # Generic fallback
+                info.model = response.strip()
 
             info.is_connected = True
             logger.info(f"Identified {address}: {info.manufacturer} {info.model}")

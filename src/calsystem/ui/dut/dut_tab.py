@@ -2,6 +2,9 @@
 DUT (Device Under Test) management tab.
 """
 
+from datetime import datetime
+from typing import Optional
+
 from PyQt6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -26,13 +29,26 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QDate
 from loguru import logger
 
+from calsystem.database.connection import get_db
+from calsystem.database.models import DUT, InputMethod, Procedure, CalibrationSession
+
 
 class DUTTab(QWidget):
     """Tab for managing Devices Under Test."""
 
     def __init__(self):
         super().__init__()
+        self._current_dut_id: Optional[int] = None  # ID of DUT being edited, None for new
         self._init_ui()
+        self._connect_signals()
+
+    def showEvent(self, event):
+        """Called when tab becomes visible."""
+        super().showEvent(event)
+        # Refresh tables when tab is shown
+        self._refresh_due_table()
+        self._refresh_dut_table()
+        self._load_procedures()
 
     def _init_ui(self):
         """Initialize the UI."""
@@ -104,6 +120,7 @@ class DUTTab(QWidget):
         )
         self.dut_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.dut_table.itemSelectionChanged.connect(self._on_dut_selected)
+        self.dut_table.itemDoubleClicked.connect(self._on_dut_double_clicked)
         all_layout.addWidget(self.dut_table)
 
         btn_layout = QHBoxLayout()
@@ -138,16 +155,27 @@ class DUTTab(QWidget):
         info_tab = QWidget()
         info_layout = QFormLayout(info_tab)
 
+        # Asset number with manual override
+        asset_layout = QHBoxLayout()
         self.asset_input = QLineEdit()
-        info_layout.addRow("Asset Number:", self.asset_input)
+        self.asset_input.setPlaceholderText("Auto-generated from Model-Serial")
+        self.asset_input.setReadOnly(True)
+        asset_layout.addWidget(self.asset_input)
+        self.manual_asset_check = QCheckBox("Manual")
+        self.manual_asset_check.setToolTip("Check to manually enter asset number")
+        asset_layout.addWidget(self.manual_asset_check)
+        info_layout.addRow("Asset Number:", asset_layout)
 
         self.make_input = QLineEdit()
+        self.make_input.setPlaceholderText("e.g., Fluke, Keysight")
         info_layout.addRow("Make:", self.make_input)
 
         self.model_input = QLineEdit()
+        self.model_input.setPlaceholderText("e.g., 87V, 34401A")
         info_layout.addRow("Model:", self.model_input)
 
         self.serial_input = QLineEdit()
+        self.serial_input.setPlaceholderText("Serial number")
         info_layout.addRow("Serial Number:", self.serial_input)
 
         self.description_input = QTextEdit()
@@ -243,43 +271,411 @@ class DUTTab(QWidget):
 
         layout.addWidget(splitter)
 
+    def _connect_signals(self):
+        """Connect signals for auto-generation and visibility toggles."""
+        # Auto-generate asset number when model or serial changes
+        self.model_input.textChanged.connect(self._update_asset_number)
+        self.serial_input.textChanged.connect(self._update_asset_number)
+
+        # Manual override checkbox toggles asset input editability
+        self.manual_asset_check.toggled.connect(self._on_manual_asset_toggled)
+
+        # Remote capable checkbox toggles input method visibility
+        self.remote_capable_check.toggled.connect(self._on_remote_capable_toggled)
+
+        # Auto-calculate due date when interval or last cal date changes
+        self.interval_spin.valueChanged.connect(self._update_due_date)
+        self.last_cal_date.dateChanged.connect(self._update_due_date)
+
+        # Due filter dropdown
+        self.due_filter_combo.currentTextChanged.connect(self._on_due_filter_changed)
+
+        # Initially hide input method if not remote capable
+        self._on_remote_capable_toggled(False)
+
+    def _load_procedures(self):
+        """Load procedures into the procedure combo."""
+        current_selection = self.procedure_combo.currentData()
+        self.procedure_combo.clear()
+        self.procedure_combo.addItem("(No procedure assigned)", None)
+
+        db = get_db()
+        if not db.is_connected:
+            return
+
+        try:
+            with db.session() as session:
+                # Get current DUT make/model for filtering
+                dut_make = self.make_input.text().strip().lower() if self.make_input else ""
+                dut_model = self.model_input.text().strip().lower() if self.model_input else ""
+
+                procedures = session.query(Procedure).order_by(Procedure.name).all()
+
+                matching_procs = []
+                other_procs = []
+
+                for proc in procedures:
+                    # Check if procedure targets this DUT make/model
+                    proc_make = (proc.target_make or "").lower()
+                    proc_model = (proc.target_model or "").lower()
+
+                    matches = False
+                    if proc_make and proc_model and dut_make and dut_model:
+                        matches = proc_make == dut_make and proc_model == dut_model
+                    elif proc_make and dut_make:
+                        matches = proc_make == dut_make
+
+                    if matches:
+                        matching_procs.append(proc)
+                    else:
+                        other_procs.append(proc)
+
+                # Add matching procedures first
+                if matching_procs:
+                    self.procedure_combo.addItem("--- Matching Procedures ---", None)
+                    for proc in matching_procs:
+                        label = f"{proc.name}"
+                        if proc.target_make or proc.target_model:
+                            label += f" ({proc.target_make or ''} {proc.target_model or ''})".strip()
+                        self.procedure_combo.addItem(label, proc.id)
+
+                # Add other procedures
+                if other_procs:
+                    self.procedure_combo.addItem("--- Other Procedures ---", None)
+                    for proc in other_procs:
+                        label = f"{proc.name}"
+                        if proc.target_make or proc.target_model:
+                            label += f" ({proc.target_make or ''} {proc.target_model or ''})".strip()
+                        self.procedure_combo.addItem(label, proc.id)
+
+                # Restore selection if valid
+                if current_selection:
+                    for i in range(self.procedure_combo.count()):
+                        if self.procedure_combo.itemData(i) == current_selection:
+                            self.procedure_combo.setCurrentIndex(i)
+                            break
+
+                logger.debug(f"Loaded {len(procedures)} procedures")
+
+        except Exception as e:
+            logger.error(f"Failed to load procedures: {e}")
+
+    def _update_asset_number(self):
+        """Auto-generate asset number from Model-SerialNumber."""
+        if self.manual_asset_check.isChecked():
+            return  # Don't auto-update if manual override is enabled
+
+        model = self.model_input.text().strip()
+        serial = self.serial_input.text().strip()
+
+        if model and serial:
+            asset = f"{model}-{serial}"
+            self.asset_input.setText(asset)
+        elif model:
+            self.asset_input.setText(f"{model}-")
+        elif serial:
+            self.asset_input.setText(f"-{serial}")
+        else:
+            self.asset_input.clear()
+
+    def _on_manual_asset_toggled(self, checked: bool):
+        """Handle manual asset number override toggle."""
+        self.asset_input.setReadOnly(not checked)
+        if checked:
+            self.asset_input.setPlaceholderText("Enter custom asset number")
+            self.asset_input.setFocus()
+        else:
+            self.asset_input.setPlaceholderText("Auto-generated from Model-Serial")
+            self._update_asset_number()
+
+    def _on_remote_capable_toggled(self, checked: bool):
+        """Show/hide input method dropdown based on remote capability."""
+        self.input_method_combo.setVisible(checked)
+        # Find the label for input method and hide it too
+        for i in range(self.input_method_combo.parent().layout().rowCount()):
+            item = self.input_method_combo.parent().layout().itemAt(i, QFormLayout.ItemRole.LabelRole)
+            if item and item.widget():
+                label = item.widget()
+                if isinstance(label, QLabel) and "Input" in label.text():
+                    label.setVisible(checked)
+                    break
+
+    def _update_due_date(self):
+        """Auto-calculate due date as Last Cal + Interval."""
+        last_cal = self.last_cal_date.date()
+        interval = self.interval_spin.value()
+        due = last_cal.addDays(interval)
+        self.due_date.setDate(due)
+
+    def _on_due_filter_changed(self, filter_text: str):
+        """Handle due filter dropdown change."""
+        logger.debug(f"Due filter changed to: {filter_text}")
+        self._refresh_due_table()
+
+    def _refresh_due_table(self):
+        """Refresh the due table with DUTs sorted by due date."""
+        db = get_db()
+        if not db.is_connected:
+            return
+
+        self.due_table.setRowCount(0)
+        filter_text = self.due_filter_combo.currentText()
+        today = datetime.now().date()
+
+        try:
+            with db.session() as session:
+                query = session.query(DUT).filter(DUT.next_due_date.isnot(None))
+
+                # Apply filter
+                if filter_text == "Overdue":
+                    query = query.filter(DUT.next_due_date < datetime.now())
+                elif filter_text == "Due This Week":
+                    week_end = datetime.now() + __import__('datetime').timedelta(days=7)
+                    query = query.filter(DUT.next_due_date <= week_end)
+                elif filter_text == "Due This Month":
+                    month_end = datetime.now() + __import__('datetime').timedelta(days=30)
+                    query = query.filter(DUT.next_due_date <= month_end)
+                # "All" shows everything
+
+                results = query.order_by(DUT.next_due_date).limit(50).all()
+
+                for dut in results:
+                    row = self.due_table.rowCount()
+                    self.due_table.insertRow(row)
+
+                    # Store DUT ID
+                    asset_item = QTableWidgetItem(dut.asset_number)
+                    asset_item.setData(Qt.ItemDataRole.UserRole, dut.id)
+                    self.due_table.setItem(row, 0, asset_item)
+
+                    self.due_table.setItem(row, 1, QTableWidgetItem(f"{dut.make} {dut.model}"))
+
+                    due_date = dut.next_due_date
+                    due_str = due_date.strftime("%Y-%m-%d") if due_date else ""
+                    due_item = QTableWidgetItem(due_str)
+                    self.due_table.setItem(row, 2, due_item)
+
+                    # Determine status and color
+                    if due_date:
+                        due_date_only = due_date.date() if hasattr(due_date, 'date') else due_date
+                        days_until = (due_date_only - today).days
+
+                        if days_until < 0:
+                            status = "OVERDUE"
+                            color = Qt.GlobalColor.red
+                        elif days_until <= 7:
+                            status = f"Due in {days_until}d"
+                            color = Qt.GlobalColor.darkYellow
+                        else:
+                            status = f"Due in {days_until}d"
+                            color = Qt.GlobalColor.darkGreen
+                    else:
+                        status = "Unknown"
+                        color = Qt.GlobalColor.gray
+
+                    status_item = QTableWidgetItem(status)
+                    status_item.setForeground(color)
+                    self.due_table.setItem(row, 3, status_item)
+
+                logger.debug(f"Due table showing {len(results)} DUTs")
+
+        except Exception as e:
+            logger.error(f"Failed to refresh due table: {e}")
+
     def _on_search(self, text: str):
-        """Handle search text change."""
-        # TODO: Implement search filtering
-        pass
+        """Handle search text change - filters as user types."""
+        self._search_duts(text)
 
     def _on_search_click(self):
         """Handle search button click."""
         search_text = self.search_input.text()
         logger.info(f"Searching for: {search_text}")
-        # TODO: Implement search
+        self._search_duts(search_text)
+
+    def _search_duts(self, search_text: str):
+        """Search DUTs in database with partial matching."""
+        db = get_db()
+        if not db.is_connected:
+            return
+
+        self.dut_table.setRowCount(0)
+
+        try:
+            with db.session() as session:
+                query = session.query(DUT)
+
+                if search_text.strip():
+                    # Use LIKE for partial matching on multiple fields
+                    pattern = f"%{search_text}%"
+                    query = query.filter(
+                        (DUT.asset_number.ilike(pattern)) |
+                        (DUT.make.ilike(pattern)) |
+                        (DUT.model.ilike(pattern)) |
+                        (DUT.serial_number.ilike(pattern))
+                    )
+
+                # Order by asset number
+                results = query.order_by(DUT.asset_number).limit(100).all()
+
+                for dut in results:
+                    row = self.dut_table.rowCount()
+                    self.dut_table.insertRow(row)
+
+                    # Store DUT ID in first item for later reference
+                    asset_item = QTableWidgetItem(dut.asset_number)
+                    asset_item.setData(Qt.ItemDataRole.UserRole, dut.id)
+                    self.dut_table.setItem(row, 0, asset_item)
+
+                    self.dut_table.setItem(row, 1, QTableWidgetItem(dut.make or ""))
+                    self.dut_table.setItem(row, 2, QTableWidgetItem(dut.model or ""))
+                    self.dut_table.setItem(row, 3, QTableWidgetItem(dut.serial_number or ""))
+
+                    # Format dates
+                    last_cal = ""
+                    if dut.last_calibration_date:
+                        last_cal = dut.last_calibration_date.strftime("%Y-%m-%d")
+                    self.dut_table.setItem(row, 4, QTableWidgetItem(last_cal))
+
+                    due_date = ""
+                    if dut.next_due_date:
+                        due_date = dut.next_due_date.strftime("%Y-%m-%d")
+                    self.dut_table.setItem(row, 5, QTableWidgetItem(due_date))
+
+                logger.debug(f"Search found {len(results)} DUTs")
+
+        except Exception as e:
+            logger.error(f"Search failed: {e}")
 
     def _on_due_item_double_clicked(self, item):
-        """Handle double-click on due item."""
+        """Handle double-click on due item - loads DUT details."""
         row = item.row()
-        asset = self.due_table.item(row, 0).text()
-        logger.info(f"Loading DUT: {asset}")
-        # TODO: Load DUT details
+        asset_item = self.due_table.item(row, 0)
+        if asset_item:
+            dut_id = asset_item.data(Qt.ItemDataRole.UserRole)
+            if dut_id:
+                self._load_dut_details(dut_id)
 
     def _on_dut_selected(self):
         """Handle DUT selection change."""
         selected = self.dut_table.selectedItems()
         if selected:
             row = selected[0].row()
-            asset = self.dut_table.item(row, 0).text()
-            logger.debug(f"Selected DUT: {asset}")
-            # TODO: Load DUT details into form
+            asset_item = self.dut_table.item(row, 0)
+            if asset_item:
+                dut_id = asset_item.data(Qt.ItemDataRole.UserRole)
+                logger.debug(f"Selected DUT ID: {dut_id}")
+
+    def _on_dut_double_clicked(self, item):
+        """Handle double-click on DUT - loads details into form."""
+        row = item.row()
+        asset_item = self.dut_table.item(row, 0)
+        if asset_item:
+            dut_id = asset_item.data(Qt.ItemDataRole.UserRole)
+            if dut_id:
+                self._load_dut_details(dut_id)
+
+    def _load_dut_details(self, dut_id: int):
+        """Load DUT details into the form."""
+        db = get_db()
+        if not db.is_connected:
+            return
+
+        try:
+            with db.session() as session:
+                dut = session.query(DUT).filter(DUT.id == dut_id).first()
+                if not dut:
+                    QMessageBox.warning(self, "Not Found", "DUT not found in database.")
+                    return
+
+                self._current_dut_id = dut.id
+
+                # Populate Information tab
+                self.manual_asset_check.setChecked(True)  # Enable editing
+                self.asset_input.setText(dut.asset_number)
+                self.make_input.setText(dut.make or "")
+                self.model_input.setText(dut.model or "")
+                self.serial_input.setText(dut.serial_number or "")
+                self.description_input.setPlainText(dut.description or "")
+
+                # Populate Capabilities tab
+                self.remote_capable_check.setChecked(dut.remote_capable or False)
+
+                # Map InputMethod enum to combo index
+                input_method_index = {
+                    InputMethod.KEYBOARD: 0,
+                    InputMethod.REMOTE: 1,
+                    InputMethod.WEBCAM: 2,
+                }.get(dut.preferred_input_method, 0)
+                self.input_method_combo.setCurrentIndex(input_method_index)
+
+                # OCR mode
+                ocr_index = 0 if dut.ocr_mode == "standard" else 1
+                self.ocr_mode_combo.setCurrentIndex(ocr_index)
+
+                # Populate Calibration tab
+                self.interval_spin.setValue(dut.calibration_interval_days or 365)
+
+                if dut.last_calibration_date:
+                    self.last_cal_date.setDate(QDate(
+                        dut.last_calibration_date.year,
+                        dut.last_calibration_date.month,
+                        dut.last_calibration_date.day,
+                    ))
+
+                if dut.next_due_date:
+                    self.due_date.setDate(QDate(
+                        dut.next_due_date.year,
+                        dut.next_due_date.month,
+                        dut.next_due_date.day,
+                    ))
+
+                # Select assigned procedure
+                self._load_procedures()  # Refresh list based on DUT make/model
+                if dut.default_procedure_id:
+                    for i in range(self.procedure_combo.count()):
+                        if self.procedure_combo.itemData(i) == dut.default_procedure_id:
+                            self.procedure_combo.setCurrentIndex(i)
+                            break
+
+                # Load calibration history
+                self._load_calibration_history(dut_id)
+
+                logger.info(f"Loaded DUT: {dut.asset_number}")
+
+        except Exception as e:
+            logger.error(f"Failed to load DUT: {e}")
+            QMessageBox.critical(self, "Error", f"Failed to load DUT:\n{e}")
 
     def _on_add_dut(self):
-        """Add a new DUT."""
+        """Add a new DUT - clears form for new entry."""
         logger.info("Adding new DUT")
-        # Clear form for new entry
+        self._current_dut_id = None  # Mark as new DUT
+
+        # Clear all form fields
         self.asset_input.clear()
         self.make_input.clear()
         self.model_input.clear()
         self.serial_input.clear()
         self.description_input.clear()
-        self.asset_input.setFocus()
+
+        # Reset checkboxes and combos
+        self.manual_asset_check.setChecked(False)
+        self.remote_capable_check.setChecked(False)
+        self.input_method_combo.setCurrentIndex(0)  # Keyboard Entry
+        self.ocr_mode_combo.setCurrentIndex(0)  # Standard OCR
+
+        # Reset calibration fields
+        self.interval_spin.setValue(365)
+        self.last_cal_date.setDate(QDate.currentDate())
+        self.due_date.setDate(QDate.currentDate().addDays(365))
+        self.procedure_combo.setCurrentIndex(0)
+
+        # Clear history table
+        self.history_table.setRowCount(0)
+
+        # Focus on make field to start entry
+        self.make_input.setFocus()
+        self.details_tabs.setCurrentIndex(0)  # Show Information tab
 
     def _on_delete_dut(self):
         """Delete selected DUT."""
@@ -318,16 +714,167 @@ class DUTTab(QWidget):
         # TODO: Switch to execution tab with this DUT
 
     def _on_save(self):
-        """Save DUT changes."""
+        """Save DUT to database."""
+        # Validate required fields
         asset = self.asset_input.text().strip()
+        make = self.make_input.text().strip()
+        model = self.model_input.text().strip()
+
         if not asset:
             QMessageBox.warning(self, "Validation Error", "Asset number is required.")
             return
 
-        logger.info(f"Saving DUT: {asset}")
-        # TODO: Save to database
+        if not make or not model:
+            QMessageBox.warning(
+                self,
+                "Validation Error",
+                "Make and Model are required fields.",
+            )
+            return
+
+        db = get_db()
+        if not db.is_connected:
+            QMessageBox.critical(
+                self,
+                "Database Error",
+                "Not connected to database. Please configure database settings.",
+            )
+            return
+
+        # Map input method combo to enum
+        input_method_map = {
+            0: InputMethod.KEYBOARD,
+            1: InputMethod.REMOTE,
+            2: InputMethod.WEBCAM,
+        }
+        input_method = input_method_map.get(
+            self.input_method_combo.currentIndex(),
+            InputMethod.KEYBOARD,
+        )
+
+        # Map OCR mode
+        ocr_mode = "standard" if self.ocr_mode_combo.currentIndex() == 0 else "seven_segment"
+
+        try:
+            with db.session() as session:
+                if self._current_dut_id:
+                    # Update existing DUT
+                    dut = session.query(DUT).filter(DUT.id == self._current_dut_id).first()
+                    if not dut:
+                        QMessageBox.warning(self, "Error", "DUT not found in database.")
+                        return
+                else:
+                    # Check for duplicate asset number
+                    existing = session.query(DUT).filter(DUT.asset_number == asset).first()
+                    if existing:
+                        QMessageBox.warning(
+                            self,
+                            "Duplicate Asset Number",
+                            f"A DUT with asset number '{asset}' already exists.",
+                        )
+                        return
+
+                    dut = DUT(asset_number=asset)
+                    session.add(dut)
+
+                # Update DUT fields
+                dut.asset_number = asset
+                dut.make = make
+                dut.model = model
+                dut.serial_number = self.serial_input.text().strip() or None
+                dut.description = self.description_input.toPlainText().strip() or None
+                dut.remote_capable = self.remote_capable_check.isChecked()
+                dut.preferred_input_method = input_method
+                dut.ocr_mode = ocr_mode
+                dut.calibration_interval_days = self.interval_spin.value()
+
+                # Convert QDate to datetime
+                last_cal = self.last_cal_date.date()
+                dut.last_calibration_date = datetime(
+                    last_cal.year(), last_cal.month(), last_cal.day()
+                )
+
+                due = self.due_date.date()
+                dut.next_due_date = datetime(due.year(), due.month(), due.day())
+
+                # Save assigned procedure
+                procedure_id = self.procedure_combo.currentData()
+                dut.default_procedure_id = procedure_id if procedure_id else None
+
+                session.flush()
+                self._current_dut_id = dut.id
+
+            logger.info(f"Saved DUT: {asset} (ID: {self._current_dut_id})")
+            QMessageBox.information(
+                self,
+                "DUT Saved",
+                f"Device '{make} {model}' saved successfully.\n\nAsset Number: {asset}",
+            )
+
+            # Refresh the DUT table
+            self._refresh_dut_table()
+
+        except Exception as e:
+            logger.error(f"Failed to save DUT: {e}")
+            QMessageBox.critical(
+                self,
+                "Error",
+                f"Failed to save DUT:\n{e}",
+            )
+
+    def _refresh_dut_table(self):
+        """Refresh the DUT table from database."""
+        logger.info("Refreshing DUT table")
+        # Use current search text or show all
+        self._search_duts(self.search_input.text())
 
     def _on_cancel(self):
         """Cancel changes."""
         logger.debug("Canceling DUT changes")
-        # TODO: Reload original data
+        # Reload original data if editing existing DUT
+        if self._current_dut_id:
+            self._load_dut_details(self._current_dut_id)
+
+    def _load_calibration_history(self, dut_id: int):
+        """Load calibration history for a DUT."""
+        self.history_table.setRowCount(0)
+
+        db = get_db()
+        if not db.is_connected:
+            return
+
+        try:
+            with db.session() as session:
+                sessions = session.query(CalibrationSession).filter(
+                    CalibrationSession.dut_id == dut_id
+                ).order_by(CalibrationSession.started_at.desc()).limit(50).all()
+
+                for cal_session in sessions:
+                    row = self.history_table.rowCount()
+                    self.history_table.insertRow(row)
+
+                    # Date
+                    date_str = cal_session.started_at.strftime("%Y-%m-%d") if cal_session.started_at else "--"
+                    date_item = QTableWidgetItem(date_str)
+                    date_item.setData(Qt.ItemDataRole.UserRole, cal_session.id)
+                    self.history_table.setItem(row, 0, date_item)
+
+                    # Work Order
+                    self.history_table.setItem(row, 1, QTableWidgetItem(cal_session.work_order or "--"))
+
+                    # Technician
+                    self.history_table.setItem(row, 2, QTableWidgetItem(cal_session.technician or "--"))
+
+                    # Result
+                    result = (cal_session.overall_result or cal_session.status.value).title()
+                    result_item = QTableWidgetItem(result)
+                    if result.lower() == "pass":
+                        result_item.setForeground(Qt.GlobalColor.darkGreen)
+                    elif result.lower() == "fail":
+                        result_item.setForeground(Qt.GlobalColor.red)
+                    self.history_table.setItem(row, 3, result_item)
+
+                logger.debug(f"Loaded {len(sessions)} calibration history records")
+
+        except Exception as e:
+            logger.error(f"Failed to load calibration history: {e}")

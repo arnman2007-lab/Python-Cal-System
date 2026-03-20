@@ -2,6 +2,9 @@
 Reports tab - for generating PDF reports and Excel exports.
 """
 
+from datetime import datetime
+from typing import Optional, List, Dict, Any
+
 from PyQt6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -22,7 +25,11 @@ from PyQt6.QtWidgets import (
     QMessageBox,
 )
 from PyQt6.QtCore import Qt, QDate
+from PyQt6.QtGui import QColor
 from loguru import logger
+
+from calsystem.database.connection import get_db
+from calsystem.database.models import CalibrationSession, DUT, Procedure, TestResult, TestPoint
 
 
 class ReportsTab(QWidget):
@@ -30,7 +37,14 @@ class ReportsTab(QWidget):
 
     def __init__(self):
         super().__init__()
+        self._current_session_id: Optional[int] = None
+        self._current_session_data: Optional[Dict] = None
         self._init_ui()
+
+    def showEvent(self, event):
+        """Called when tab becomes visible."""
+        super().showEvent(event)
+        self._on_search()  # Refresh results
 
     def _init_ui(self):
         """Initialize the UI."""
@@ -185,40 +199,75 @@ class ReportsTab(QWidget):
         """Search for calibration sessions."""
         asset = self.asset_filter.text().strip()
         workorder = self.workorder_filter.text().strip()
-        date_from = self.date_from.date().toString("yyyy-MM-dd")
-        date_to = self.date_to.date().toString("yyyy-MM-dd")
+        date_from = self.date_from.date().toPyDate()
+        date_to = self.date_to.date().toPyDate()
 
         logger.info(
             f"Searching sessions: asset={asset}, wo={workorder}, "
             f"from={date_from}, to={date_to}"
         )
 
-        # TODO: Query database
-        # For now, load sample data
-        self._load_sample_sessions()
+        self.sessions_table.setRowCount(0)
 
-    def _load_sample_sessions(self):
-        """Load sample session data for demonstration."""
-        sessions = [
-            ("2024-01-15", "789-123456789", "WO-2024-001", "John Smith", "Pass"),
-            ("2024-01-14", "3458A-87654321", "WO-2024-002", "Jane Doe", "Pass"),
-            ("2024-01-13", "5520A-11111111", "WO-2024-003", "John Smith", "Fail"),
-        ]
+        db = get_db()
+        if not db.is_connected:
+            return
 
-        self.sessions_table.setRowCount(len(sessions))
+        try:
+            with db.session() as session:
+                query = session.query(CalibrationSession).join(DUT)
 
-        for i, (date, asset, wo, tech, result) in enumerate(sessions):
-            self.sessions_table.setItem(i, 0, QTableWidgetItem(date))
-            self.sessions_table.setItem(i, 1, QTableWidgetItem(asset))
-            self.sessions_table.setItem(i, 2, QTableWidgetItem(wo))
-            self.sessions_table.setItem(i, 3, QTableWidgetItem(tech))
+                # Apply filters
+                if asset:
+                    query = query.filter(DUT.asset_number.ilike(f"%{asset}%"))
 
-            result_item = QTableWidgetItem(result)
-            if result == "Pass":
-                result_item.setForeground(Qt.GlobalColor.darkGreen)
-            else:
-                result_item.setForeground(Qt.GlobalColor.red)
-            self.sessions_table.setItem(i, 4, result_item)
+                if workorder:
+                    query = query.filter(CalibrationSession.work_order.ilike(f"%{workorder}%"))
+
+                # Date range
+                from datetime import datetime, timedelta
+                date_from_dt = datetime.combine(date_from, datetime.min.time())
+                date_to_dt = datetime.combine(date_to, datetime.max.time())
+                query = query.filter(CalibrationSession.started_at >= date_from_dt)
+                query = query.filter(CalibrationSession.started_at <= date_to_dt)
+
+                # Order by date descending
+                results = query.order_by(CalibrationSession.started_at.desc()).limit(100).all()
+
+                for cal_session in results:
+                    row = self.sessions_table.rowCount()
+                    self.sessions_table.insertRow(row)
+
+                    # Date
+                    date_str = cal_session.started_at.strftime("%Y-%m-%d %H:%M") if cal_session.started_at else "--"
+                    date_item = QTableWidgetItem(date_str)
+                    date_item.setData(Qt.ItemDataRole.UserRole, cal_session.id)
+                    self.sessions_table.setItem(row, 0, date_item)
+
+                    # Asset
+                    self.sessions_table.setItem(row, 1, QTableWidgetItem(cal_session.dut.asset_number if cal_session.dut else "--"))
+
+                    # Work Order
+                    self.sessions_table.setItem(row, 2, QTableWidgetItem(cal_session.work_order or "--"))
+
+                    # Technician
+                    self.sessions_table.setItem(row, 3, QTableWidgetItem(cal_session.technician or "--"))
+
+                    # Result
+                    result = (cal_session.overall_result or cal_session.status.value).title()
+                    result_item = QTableWidgetItem(result)
+                    if result.lower() == "pass" or result.lower() == "completed":
+                        result_item.setForeground(Qt.GlobalColor.darkGreen)
+                    elif result.lower() == "fail":
+                        result_item.setForeground(Qt.GlobalColor.red)
+                    elif result.lower() == "aborted":
+                        result_item.setForeground(Qt.GlobalColor.darkYellow)
+                    self.sessions_table.setItem(row, 4, result_item)
+
+                logger.debug(f"Found {len(results)} sessions")
+
+        except Exception as e:
+            logger.error(f"Search failed: {e}")
 
     def _on_session_selected(self):
         """Handle session selection."""
@@ -227,99 +276,343 @@ class ReportsTab(QWidget):
             return
 
         row = selected[0].row()
-        date = self.sessions_table.item(row, 0).text()
-        asset = self.sessions_table.item(row, 1).text()
-        wo = self.sessions_table.item(row, 2).text()
-        tech = self.sessions_table.item(row, 3).text()
-        result = self.sessions_table.item(row, 4).text()
+        date_item = self.sessions_table.item(row, 0)
+        session_id = date_item.data(Qt.ItemDataRole.UserRole)
 
-        # Update details
-        self.detail_asset.setText(asset)
-        self.detail_dut.setText("Fluke 789 (example)")
-        self.detail_workorder.setText(wo)
-        self.detail_date.setText(date)
-        self.detail_technician.setText(tech)
-        self.detail_result.setText(result)
-        self.detail_procedure.setText("Standard DMM Calibration (example)")
+        if not session_id:
+            return
 
-        # Load test results
-        self._load_sample_results()
+        self._current_session_id = session_id
+        self._load_session_details(session_id)
 
-        logger.debug(f"Selected session: {wo}")
+    def _load_session_details(self, session_id: int):
+        """Load session details from database."""
+        db = get_db()
+        if not db.is_connected:
+            return
 
-    def _load_sample_results(self):
-        """Load sample test results."""
-        results = [
-            ("DC 1V", "1.0000 V", "1.0001 V", "+0.01%", "Pass"),
-            ("DC 10V", "10.000 V", "10.002 V", "+0.02%", "Pass"),
-            ("DC 100V", "100.00 V", "100.05 V", "+0.05%", "Pass"),
-            ("AC 1V", "1.0000 V", "0.9998 V", "-0.02%", "Pass"),
-        ]
+        try:
+            with db.session() as session:
+                cal_session = session.query(CalibrationSession).filter(
+                    CalibrationSession.id == session_id
+                ).first()
 
-        self.results_table.setRowCount(len(results))
+                if not cal_session:
+                    return
 
-        for i, (test, nominal, measured, dev, status) in enumerate(results):
-            self.results_table.setItem(i, 0, QTableWidgetItem(test))
-            self.results_table.setItem(i, 1, QTableWidgetItem(nominal))
-            self.results_table.setItem(i, 2, QTableWidgetItem(measured))
-            self.results_table.setItem(i, 3, QTableWidgetItem(dev))
+                # Update details panel
+                dut = cal_session.dut
+                procedure = cal_session.procedure
 
-            status_item = QTableWidgetItem(status)
-            if status == "Pass":
-                status_item.setForeground(Qt.GlobalColor.darkGreen)
-            else:
-                status_item.setForeground(Qt.GlobalColor.red)
-            self.results_table.setItem(i, 4, status_item)
+                self.detail_asset.setText(dut.asset_number if dut else "--")
+                self.detail_dut.setText(f"{dut.make} {dut.model}" if dut else "--")
+                self.detail_workorder.setText(cal_session.work_order or "--")
+                self.detail_date.setText(
+                    cal_session.started_at.strftime("%Y-%m-%d %H:%M") if cal_session.started_at else "--"
+                )
+                self.detail_technician.setText(cal_session.technician or "--")
+
+                result = (cal_session.overall_result or cal_session.status.value).title()
+                self.detail_result.setText(result)
+                if result.lower() == "pass":
+                    self.detail_result.setStyleSheet("color: green; font-weight: bold;")
+                elif result.lower() == "fail":
+                    self.detail_result.setStyleSheet("color: red; font-weight: bold;")
+                else:
+                    self.detail_result.setStyleSheet("")
+
+                self.detail_procedure.setText(procedure.name if procedure else "--")
+
+                # Store session data for export
+                self._current_session_data = {
+                    "id": session_id,
+                    "asset": dut.asset_number if dut else "",
+                    "dut_info": f"{dut.make} {dut.model} S/N: {dut.serial_number}" if dut else "",
+                    "work_order": cal_session.work_order,
+                    "date": cal_session.started_at,
+                    "technician": cal_session.technician,
+                    "result": result,
+                    "procedure": procedure.name if procedure else "",
+                }
+
+                # Load test results
+                self._load_test_results(session_id)
+
+                logger.debug(f"Loaded session {session_id}")
+
+        except Exception as e:
+            logger.error(f"Failed to load session details: {e}")
+
+    def _load_test_results(self, session_id: int):
+        """Load test results for a session."""
+        self.results_table.setRowCount(0)
+
+        db = get_db()
+        if not db.is_connected:
+            return
+
+        try:
+            with db.session() as session:
+                results = session.query(TestResult).filter(
+                    TestResult.session_id == session_id
+                ).join(TestPoint).order_by(TestResult.measured_at).all()
+
+                for result in results:
+                    row = self.results_table.rowCount()
+                    self.results_table.insertRow(row)
+
+                    tp = result.test_point
+
+                    # Test Point
+                    test_name = tp.description if tp else f"Point {row + 1}"
+                    self.results_table.setItem(row, 0, QTableWidgetItem(test_name))
+
+                    # Nominal
+                    nominal_str = f"{tp.nominal_value} {tp.unit}" if tp else "--"
+                    self.results_table.setItem(row, 1, QTableWidgetItem(nominal_str))
+
+                    # Measured
+                    measured_str = f"{result.measured_value:.6g}" if result.measured_value else "--"
+                    self.results_table.setItem(row, 2, QTableWidgetItem(measured_str))
+
+                    # Deviation
+                    if tp and result.measured_value is not None:
+                        deviation = result.measured_value - (tp.nominal_value or 0)
+                        if tp.nominal_value and tp.nominal_value != 0:
+                            dev_pct = (deviation / tp.nominal_value) * 100
+                            dev_str = f"{dev_pct:+.4f}%"
+                        else:
+                            dev_str = f"{deviation:+.6g}"
+                    else:
+                        dev_str = "--"
+                    self.results_table.setItem(row, 3, QTableWidgetItem(dev_str))
+
+                    # Status
+                    status = result.status.title() if result.status else "--"
+                    status_item = QTableWidgetItem(status)
+                    if status.lower() == "pass":
+                        status_item.setForeground(Qt.GlobalColor.darkGreen)
+                    elif status.lower() == "fail":
+                        status_item.setForeground(Qt.GlobalColor.red)
+                    self.results_table.setItem(row, 4, status_item)
+
+                logger.debug(f"Loaded {len(results)} test results")
+
+        except Exception as e:
+            logger.error(f"Failed to load test results: {e}")
 
     def _on_generate_pdf(self):
         """Generate PDF report."""
-        selected = self.sessions_table.selectedItems()
-        if not selected:
+        if not self._current_session_id or not self._current_session_data:
             QMessageBox.warning(
                 self, "No Selection", "Please select a session to generate a report."
             )
             return
 
+        # Suggest filename based on session data
+        asset = self._current_session_data.get("asset", "unknown").replace("/", "-")
+        date_str = QDate.currentDate().toString("yyyyMMdd")
+        suggested_name = f"calibration_report_{asset}_{date_str}.pdf"
+
         file_path, _ = QFileDialog.getSaveFileName(
             self,
             "Save PDF Report",
-            f"calibration_report_{QDate.currentDate().toString('yyyyMMdd')}.pdf",
+            suggested_name,
             "PDF Files (*.pdf)",
         )
 
-        if file_path:
-            logger.info(f"Generating PDF: {file_path}")
-            # TODO: Generate actual PDF
+        if not file_path:
+            return
+
+        logger.info(f"Generating PDF: {file_path}")
+
+        try:
+            self._generate_pdf_report(file_path)
             QMessageBox.information(
                 self,
                 "Report Generated",
                 f"PDF report saved to:\n{file_path}",
             )
+        except Exception as e:
+            logger.error(f"Failed to generate PDF: {e}")
+            QMessageBox.critical(self, "Error", f"Failed to generate PDF:\n{e}")
+
+    def _generate_pdf_report(self, file_path: str):
+        """Generate the actual PDF report."""
+        try:
+            from reportlab.lib import colors
+            from reportlab.lib.pagesizes import letter
+            from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+            from reportlab.lib.units import inch
+            from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+        except ImportError:
+            raise ImportError("reportlab is required for PDF generation. Install with: pip install reportlab")
+
+        doc = SimpleDocTemplate(file_path, pagesize=letter)
+        styles = getSampleStyleSheet()
+        elements = []
+
+        # Title
+        title_style = ParagraphStyle('Title', parent=styles['Title'], fontSize=18, spaceAfter=20)
+        elements.append(Paragraph("Calibration Report", title_style))
+        elements.append(Spacer(1, 12))
+
+        # Session info table
+        data = self._current_session_data
+        info_data = [
+            ["Asset Number:", data.get("asset", "")],
+            ["DUT:", data.get("dut_info", "")],
+            ["Work Order:", data.get("work_order", "")],
+            ["Date:", data.get("date").strftime("%Y-%m-%d %H:%M") if data.get("date") else ""],
+            ["Technician:", data.get("technician", "")],
+            ["Procedure:", data.get("procedure", "")],
+            ["Result:", data.get("result", "")],
+        ]
+
+        info_table = Table(info_data, colWidths=[1.5*inch, 4*inch])
+        info_table.setStyle(TableStyle([
+            ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
+            ('ALIGN', (0, 0), (0, -1), 'RIGHT'),
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+        ]))
+        elements.append(info_table)
+        elements.append(Spacer(1, 20))
+
+        # Test results
+        elements.append(Paragraph("Test Results", styles['Heading2']))
+        elements.append(Spacer(1, 12))
+
+        # Build results data from table
+        results_data = [["Test Point", "Nominal", "Measured", "Deviation", "Status"]]
+        for row in range(self.results_table.rowCount()):
+            row_data = []
+            for col in range(5):
+                item = self.results_table.item(row, col)
+                row_data.append(item.text() if item else "")
+            results_data.append(row_data)
+
+        if len(results_data) > 1:
+            results_table = Table(results_data, colWidths=[2*inch, 1.2*inch, 1.2*inch, 1*inch, 0.8*inch])
+            results_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, -1), 9),
+                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
+                ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ]))
+            elements.append(results_table)
+
+        elements.append(Spacer(1, 30))
+
+        # Signature lines
+        elements.append(Paragraph("Signatures", styles['Heading3']))
+        elements.append(Spacer(1, 20))
+
+        sig_data = [
+            ["Technician: _____________________", "Date: ___________"],
+            ["", ""],
+            ["Supervisor: _____________________", "Date: ___________"],
+        ]
+        sig_table = Table(sig_data, colWidths=[3.5*inch, 2*inch])
+        elements.append(sig_table)
+
+        doc.build(elements)
 
     def _on_export_excel(self):
         """Export to Excel."""
-        selected = self.sessions_table.selectedItems()
-        if not selected:
+        if not self._current_session_id or not self._current_session_data:
             QMessageBox.warning(
                 self, "No Selection", "Please select a session to export."
             )
             return
 
+        asset = self._current_session_data.get("asset", "unknown").replace("/", "-")
+        date_str = QDate.currentDate().toString("yyyyMMdd")
+        suggested_name = f"calibration_data_{asset}_{date_str}.xlsx"
+
         file_path, _ = QFileDialog.getSaveFileName(
             self,
             "Export to Excel",
-            f"calibration_data_{QDate.currentDate().toString('yyyyMMdd')}.xlsx",
+            suggested_name,
             "Excel Files (*.xlsx)",
         )
 
-        if file_path:
-            logger.info(f"Exporting to Excel: {file_path}")
-            # TODO: Export to Excel
+        if not file_path:
+            return
+
+        logger.info(f"Exporting to Excel: {file_path}")
+
+        try:
+            self._export_to_excel(file_path)
             QMessageBox.information(
                 self,
                 "Export Complete",
                 f"Data exported to:\n{file_path}",
             )
+        except Exception as e:
+            logger.error(f"Failed to export to Excel: {e}")
+            QMessageBox.critical(self, "Error", f"Failed to export:\n{e}")
+
+    def _export_to_excel(self, file_path: str):
+        """Export session data to Excel."""
+        try:
+            import openpyxl
+            from openpyxl.styles import Font, PatternFill, Alignment
+        except ImportError:
+            raise ImportError("openpyxl is required for Excel export. Install with: pip install openpyxl")
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Calibration Results"
+
+        # Header style
+        header_font = Font(bold=True)
+        header_fill = PatternFill(start_color="CCCCCC", end_color="CCCCCC", fill_type="solid")
+
+        # Session info
+        data = self._current_session_data
+        ws['A1'] = "Asset Number:"
+        ws['B1'] = data.get("asset", "")
+        ws['A2'] = "DUT:"
+        ws['B2'] = data.get("dut_info", "")
+        ws['A3'] = "Work Order:"
+        ws['B3'] = data.get("work_order", "")
+        ws['A4'] = "Date:"
+        ws['B4'] = data.get("date").strftime("%Y-%m-%d %H:%M") if data.get("date") else ""
+        ws['A5'] = "Technician:"
+        ws['B5'] = data.get("technician", "")
+        ws['A6'] = "Result:"
+        ws['B6'] = data.get("result", "")
+
+        for row in range(1, 7):
+            ws.cell(row=row, column=1).font = header_font
+
+        # Results header
+        start_row = 8
+        headers = ["Test Point", "Nominal", "Measured", "Deviation", "Status"]
+        for col, header in enumerate(headers, 1):
+            cell = ws.cell(row=start_row, column=col, value=header)
+            cell.font = header_font
+            cell.fill = header_fill
+
+        # Results data
+        for row in range(self.results_table.rowCount()):
+            for col in range(5):
+                item = self.results_table.item(row, col)
+                ws.cell(row=start_row + row + 1, column=col + 1, value=item.text() if item else "")
+
+        # Auto-size columns
+        for col in ws.columns:
+            max_length = 0
+            column = col[0].column_letter
+            for cell in col:
+                if cell.value:
+                    max_length = max(max_length, len(str(cell.value)))
+            ws.column_dimensions[column].width = max_length + 2
+
+        wb.save(file_path)
 
     def _on_print(self):
         """Print report."""
