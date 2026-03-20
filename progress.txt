@@ -1,0 +1,23 @@
+# Calsystem - Ralph Progress Log
+
+## Project: Calsystem - Calibration Management System
+## Branch: ralph/calsystem-mvp
+## Started:
+
+---
+
+## Story Progress
+
+(Ralph will update this file as stories are completed)
+
+---
+
+## Notes
+
+- Project skeleton already exists with PyQt6 UI, database models, and module structure
+- Database models are defined in src/calsystem/database/models.py
+- UI tabs exist but need functionality connected
+- VISAManager and CommandBankManager exist but need UI integration
+- OCR module has WebcamCapture and OCRReader classes ready
+
+---

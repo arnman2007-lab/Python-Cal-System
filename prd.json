@@ -1,0 +1,619 @@
+{
+  "project": "Calsystem",
+  "branchName": "ralph/calsystem-mvp",
+  "description": "Calibration Management System - MetCal-like application for calibration laboratories with PyQt6, PyVISA, and MySQL",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Database connection settings dialog",
+      "description": "As an administrator, I need a settings dialog to configure MySQL connection so workstations can connect to the shared database.",
+      "acceptanceCriteria": [
+        "Add Settings dialog accessible from File > Settings menu in app.py",
+        "Dialog has fields: Host, Port, Username, Password, Database Name",
+        "Test Connection button that calls DatabaseManager.connect() and shows success/failure",
+        "Save button stores settings to ~/.calsystem/config.json using pydantic-settings",
+        "Settings load automatically on app startup",
+        "Typecheck passes"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Database table creation on first run",
+      "description": "As a developer, I need the database tables to be created automatically so the app works on fresh installations.",
+      "acceptanceCriteria": [
+        "On successful database connection, call DatabaseManager.create_tables()",
+        "Tables created from models.py: standards, workstation_configs, workstation_standards, duts, procedures, test_sections, test_points, wiring_diagrams, command_banks, calibration_sessions, test_results",
+        "Status bar shows 'Database: Connected' on success",
+        "Error handling shows message box on connection failure",
+        "Typecheck passes"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "VISA instrument scanning",
+      "description": "As a technician, I want to scan for connected GPIB/COM instruments so I can see what's available.",
+      "acceptanceCriteria": [
+        "Scan button in WorkstationTab calls VISAManager.scan_and_identify()",
+        "Results populate detected_table with columns: Address, Manufacturer, Model, Serial, Status",
+        "Scan runs in QThread to keep UI responsive",
+        "Status shows 'Scanning...' during scan, 'Found X instruments' when done",
+        "Handles PyVISA not installed gracefully with error message",
+        "Typecheck passes"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Add standard dialog",
+      "description": "As a technician, I want to add a detected instrument as a workstation standard so I can use it for calibrations.",
+      "acceptanceCriteria": [
+        "Create AddStandardDialog with fields: Make, Model, Serial, STD ID, Address, Group dropdown",
+        "Group dropdown options: Calibrator, DMM, Counter, Other",
+        "When adding from detected list, pre-populate fields from scan results",
+        "Save button creates Standard record in database via SQLAlchemy session",
+        "Also creates WorkstationStandard association for current workstation",
+        "Typecheck passes"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "Display workstation standards table",
+      "description": "As a technician, I want to see all standards assigned to my workstation in a table.",
+      "acceptanceCriteria": [
+        "standards_table in WorkstationTab loads from database on tab activation",
+        "Query joins Standard with WorkstationStandard for current workstation",
+        "Displays columns: Group, Make, Model, Serial, STD ID, Address, Status",
+        "Group filter dropdown filters table by device_group",
+        "Remove button deletes WorkstationStandard association (not the Standard itself)",
+        "Typecheck passes"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "Save and load workstation configuration",
+      "description": "As a technician, I want to save my workstation setup by name so I can restore it later.",
+      "acceptanceCriteria": [
+        "Save As button prompts for config name and saves WorkstationConfig to database",
+        "Config stores list of standard IDs and their addresses for this workstation",
+        "Config dropdown loads available configs from database",
+        "Load button restores standards table from selected config",
+        "Validates addresses still exist in VISA before loading",
+        "Typecheck passes"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-007",
+      "title": "Add DUT form with asset number generation",
+      "description": "As a technician, I want to add a new device under test with auto-generated asset number.",
+      "acceptanceCriteria": [
+        "Add New DUT button in DUTTab clears form for new entry",
+        "Asset number auto-generates as Model-SerialNumber when both fields filled",
+        "Manual override checkbox allows custom asset number entry",
+        "Remote Capable checkbox shows/hides input method dropdown",
+        "Input method dropdown: Keyboard Entry, Remote Reading, Webcam OCR",
+        "Save button creates DUT record in database",
+        "Typecheck passes"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-008",
+      "title": "DUT search and autocomplete",
+      "description": "As a technician, I want to search for DUTs by asset number or other fields.",
+      "acceptanceCriteria": [
+        "Search input in DUTTab filters dut_table as user types",
+        "Search matches on: asset_number, make, model, serial_number",
+        "Results show in dut_table with columns: Asset, Make, Model, Serial, Last Cal, Due Date",
+        "Double-click result loads DUT details into form on right side",
+        "Query uses SQLAlchemy LIKE for partial matching",
+        "Typecheck passes"
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-009",
+      "title": "DUT calibration due date tracking",
+      "description": "As a technician, I want to set calibration intervals and see when DUTs are due.",
+      "acceptanceCriteria": [
+        "Calibration tab in DUT details has: Interval (days), Last Cal Date, Due Date fields",
+        "Due date auto-calculates as Last Cal + Interval",
+        "due_table at top of DUTTab shows DUTs sorted by next_due_date",
+        "Filter dropdown: Overdue, Due This Week, Due This Month, All",
+        "Color coding: Red = overdue, Yellow = due within 7 days, Green = more than 7 days",
+        "Typecheck passes"
+      ],
+      "priority": 9,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-010",
+      "title": "Command bank CRUD operations",
+      "description": "As a technician, I want to create and edit command sets for device models.",
+      "acceptanceCriteria": [
+        "Create CommandBankDialog accessible from Standards tab or Procedures menu",
+        "Form fields: Make, Model, Device Type dropdown",
+        "Commands section with editable rows: Command Name, SCPI String",
+        "Pre-populate with common commands: *IDN?, *RST, OPER, STBY, etc.",
+        "Save stores CommandBank record with commands as JSON",
+        "List view shows all command banks, filterable by make/model",
+        "Typecheck passes"
+      ],
+      "priority": 10,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-011",
+      "title": "Auto-detect missing command bank warning",
+      "description": "As a technician, I want to be warned when a standard has no command bank.",
+      "acceptanceCriteria": [
+        "When adding standard to workstation, check if CommandBank exists for make/model",
+        "If not found, show warning icon in standards_table Status column",
+        "Tooltip on warning: 'No command bank for [Make Model]'",
+        "Right-click context menu has 'Create Command Bank...' option",
+        "Opens CommandBankDialog pre-filled with make/model from selected standard",
+        "Typecheck passes"
+      ],
+      "priority": 11,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-012",
+      "title": "Create new procedure",
+      "description": "As a technician, I want to create a new calibration procedure.",
+      "acceptanceCriteria": [
+        "New Procedure button opens dialog with: Name, Description, Target Make, Target Model",
+        "Save creates Procedure record in database",
+        "New procedure appears in procedure_list table",
+        "Selecting procedure loads it into the builder view",
+        "name_input, target_make_input, target_model_input populate from selected procedure",
+        "Typecheck passes"
+      ],
+      "priority": 12,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-013",
+      "title": "Add test sections to procedure",
+      "description": "As a technician, I want to add named sections to organize test points.",
+      "acceptanceCriteria": [
+        "Add Section button creates new TestSection in database linked to current procedure",
+        "Section appears as top-level item in structure_tree QTreeWidget",
+        "Section name is editable inline",
+        "Sections ordered by 'order' field, drag-drop reordering updates order values",
+        "Delete section removes TestSection and all child TestPoints",
+        "Typecheck passes"
+      ],
+      "priority": 13,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-014",
+      "title": "Add test points to sections",
+      "description": "As a technician, I want to add test points within sections.",
+      "acceptanceCriteria": [
+        "Add Test Point button creates TestPoint under selected section",
+        "Test point appears as child item in structure_tree under its section",
+        "Selecting test point loads details into right panel form",
+        "Form fields: Test Type, Nominal, Unit, Frequency, Tolerance, Tolerance Type",
+        "Save updates TestPoint record in database",
+        "Tree displays: test point name, nominal value, tolerance",
+        "Typecheck passes"
+      ],
+      "priority": 14,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-015",
+      "title": "Configure test point commands",
+      "description": "As a technician, I want to set source and measure commands for test points.",
+      "acceptanceCriteria": [
+        "Test point form has command fields: Source Command, Operate Command, Measure Command",
+        "Command fields support placeholder syntax: {value}, {unit}, {frequency}",
+        "Dropdown to select from CommandBank templates if make/model matches",
+        "Commands saved to TestPoint.source_command, operate_command, measure_command",
+        "Typecheck passes"
+      ],
+      "priority": 15,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-016",
+      "title": "Excel import wizard for procedures",
+      "description": "As a technician, I want to import test points from an Excel file.",
+      "acceptanceCriteria": [
+        "Import from Excel button opens file dialog for .xlsx/.xls files",
+        "Wizard step 1: Select sheet from workbook",
+        "Wizard step 2: Map columns to fields (Nominal, Unit, Tolerance, Section, etc.)",
+        "Wizard step 3: Preview imported rows before confirming",
+        "Import creates TestSections and TestPoints from mapped data",
+        "Typecheck passes"
+      ],
+      "priority": 16,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-017",
+      "title": "Assign procedure to DUT",
+      "description": "As a technician, I want to assign a default procedure to a DUT.",
+      "acceptanceCriteria": [
+        "procedure_combo in DUT Calibration tab loads all Procedures from database",
+        "Filter procedures by target_make/target_model matching DUT if available",
+        "Selection saves Procedure ID to DUT.default_procedure_id",
+        "When loading DUT in execution tab, auto-select assigned procedure",
+        "Typecheck passes"
+      ],
+      "priority": 17,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-018",
+      "title": "Start calibration session",
+      "description": "As a technician, I want to start a calibration session for a DUT.",
+      "acceptanceCriteria": [
+        "ExecutionTab: dut_combo loads DUTs from database with autocomplete",
+        "workorder_input is required before starting",
+        "procedure_combo loads procedures, auto-selects if DUT has default",
+        "Start Session button creates CalibrationSession record in database",
+        "Session stores: dut_id, procedure_id, work_order, technician, started_at",
+        "UI locks session fields and enables test controls",
+        "Typecheck passes"
+      ],
+      "priority": 18,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-019",
+      "title": "Load test points into execution view",
+      "description": "As a technician, I want to see all test points when a session starts.",
+      "acceptanceCriteria": [
+        "On session start, load TestPoints via Procedure -> TestSections -> TestPoints",
+        "Populate testpoints_table with columns: #, Section/Test, Nominal, Measured, Status",
+        "Set progress_bar maximum to total test point count",
+        "Select first test point and display in nominal_display",
+        "Update section_label, testpoint_label, tolerance_label from selected point",
+        "Typecheck passes"
+      ],
+      "priority": 19,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-020",
+      "title": "Execute test point - keyboard entry",
+      "description": "As a technician, I want to enter DUT readings via keyboard.",
+      "acceptanceCriteria": [
+        "When input_method_combo is 'Keyboard Entry', show reading_input and submit_btn",
+        "If calibrator standard assigned, send source_command via VISAManager.write()",
+        "Send operate_command to enable output",
+        "status_display shows 'Sourcing [value]...'",
+        "User enters reading in reading_input, presses Enter or Submit",
+        "Calculate pass/fail by comparing to tolerance",
+        "Create TestResult record with measured_value, status, input_method",
+        "Typecheck passes"
+      ],
+      "priority": 20,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-021",
+      "title": "Pass/fail tolerance calculation",
+      "description": "As a technician, I want readings compared to tolerance automatically.",
+      "acceptanceCriteria": [
+        "Calculate deviation = measured - nominal",
+        "For percent tolerance: pass if abs(deviation/nominal)*100 <= tolerance_value",
+        "For absolute tolerance: pass if abs(deviation) <= tolerance_value",
+        "Update testpoints_table status column: green 'Pass' or red 'Fail'",
+        "Update pass_label and fail_label counts",
+        "Advance progress_bar value by 1",
+        "Typecheck passes"
+      ],
+      "priority": 21,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-022",
+      "title": "Handle failed test point dialog",
+      "description": "As a technician, I want options when a test point fails.",
+      "acceptanceCriteria": [
+        "On fail, show QMessageBox with Nominal, Measured, Deviation, Tolerance",
+        "Three buttons: Continue (proceed to next), Redo (repeat this point), Stop (halt session)",
+        "Log technician choice in TestResult.redo_reason or session notes",
+        "Continue: advance to next test point",
+        "Redo: re-execute current test point, link to previous result",
+        "Stop: call pause/stop handler",
+        "Typecheck passes"
+      ],
+      "priority": 22,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-023",
+      "title": "Advance to next test point",
+      "description": "As a technician, I want the system to move to the next test point after each reading.",
+      "acceptanceCriteria": [
+        "After recording result, select next row in testpoints_table",
+        "Update nominal_display with new test point's value",
+        "Update section_label, testpoint_label, tolerance_label",
+        "If wiring diagram exists for section, update wiring_label with image",
+        "If last test point, show 'Session Complete' message and enable report generation",
+        "Typecheck passes"
+      ],
+      "priority": 23,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-024",
+      "title": "Pause and resume session",
+      "description": "As a technician, I want to pause testing and resume later.",
+      "acceptanceCriteria": [
+        "Pause button sends standby command to calibrator if connected",
+        "Button text changes to 'Resume', status shows 'Session Paused'",
+        "Resume sends operate command and continues from current test point",
+        "Session status in database updated to 'paused' or 'in_progress'",
+        "Typecheck passes"
+      ],
+      "priority": 24,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-025",
+      "title": "Stop session and save partial results",
+      "description": "As a technician, I want to stop a session and save what's done.",
+      "acceptanceCriteria": [
+        "Stop button shows confirmation dialog",
+        "On confirm, send standby to calibrator",
+        "Update CalibrationSession.status to 'aborted'",
+        "All TestResults already saved (saved immediately per reading)",
+        "Re-enable session setup fields",
+        "Aborted sessions appear in history and can be viewed",
+        "Typecheck passes"
+      ],
+      "priority": 25,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-026",
+      "title": "Redo any test point",
+      "description": "As a technician, I want to redo a completed test point.",
+      "acceptanceCriteria": [
+        "Double-click or Redo button on any row in testpoints_table",
+        "Navigate to that test point (update displays)",
+        "Execute test point again",
+        "New TestResult links to previous via previous_result_id, is_redo=True",
+        "Table shows latest result, original preserved in history",
+        "Typecheck passes"
+      ],
+      "priority": 26,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-027",
+      "title": "Execute test point - remote reading",
+      "description": "As a technician, I want automatic readings from remote-capable DUTs.",
+      "acceptanceCriteria": [
+        "When input_method is 'Remote Reading', show get_reading_btn instead of reading_input",
+        "Click Get Remote: send source_command, operate_command to calibrator",
+        "Send measure_command to DUT via VISAManager.query()",
+        "Parse numeric response and display in reading_input",
+        "Auto-submit reading for pass/fail calculation",
+        "Handle query timeout with error message",
+        "Typecheck passes"
+      ],
+      "priority": 27,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-028",
+      "title": "Webcam capture for OCR",
+      "description": "As a technician, I want to capture DUT display via webcam.",
+      "acceptanceCriteria": [
+        "When input_method is 'Webcam OCR', show capture_btn",
+        "Click Capture opens WebcamCaptureDialog with live preview",
+        "Dialog uses WebcamCapture class from ocr/webcam.py",
+        "User can draw ROI rectangle on preview to select display area",
+        "Capture button grabs frame and crops to ROI",
+        "Dialog returns captured image for OCR processing",
+        "Typecheck passes"
+      ],
+      "priority": 28,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-029",
+      "title": "OCR reading extraction",
+      "description": "As a technician, I want OCR to extract numeric readings from captured images.",
+      "acceptanceCriteria": [
+        "After capture, pass image to OCRReader or SevenSegmentReader based on DUT.ocr_mode",
+        "Display extracted text in reading_input for confirmation",
+        "User can edit/correct before submitting",
+        "Submit button processes reading same as keyboard entry",
+        "Handle OCR failure with message 'Could not read display'",
+        "Typecheck passes"
+      ],
+      "priority": 29,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-030",
+      "title": "Session history and search",
+      "description": "As a technician, I want to search past calibration sessions.",
+      "acceptanceCriteria": [
+        "ReportsTab search fields: Asset Number, Work Order, Date Range",
+        "Search button queries CalibrationSession with filters",
+        "Results in sessions_table: Date, Asset, Work Order, Technician, Result",
+        "Color code Result column: green Pass, red Fail",
+        "Selecting session loads details and test results",
+        "Typecheck passes"
+      ],
+      "priority": 30,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-031",
+      "title": "View session test results",
+      "description": "As a technician, I want to see all test results for a session.",
+      "acceptanceCriteria": [
+        "When session selected, query TestResult joined with TestPoint",
+        "Populate results_table: Test Point, Nominal, Measured, Deviation, Status",
+        "Update detail labels: asset, DUT info, work order, date, technician, result",
+        "Calculate and display overall pass/fail based on individual results",
+        "Typecheck passes"
+      ],
+      "priority": 31,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-032",
+      "title": "Generate PDF report",
+      "description": "As a technician, I want to generate a PDF calibration report.",
+      "acceptanceCriteria": [
+        "Generate PDF button in ReportsTab requires session selected",
+        "Opens QFileDialog to choose save location",
+        "Calls PDFReportGenerator.generate() with session data and test results",
+        "PDF includes: header, session info table, test results table, summary, signature lines",
+        "Show success message with file path",
+        "Typecheck passes"
+      ],
+      "priority": 32,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-033",
+      "title": "Export results to Excel",
+      "description": "As a technician, I want to export calibration results to Excel.",
+      "acceptanceCriteria": [
+        "Export to Excel button requires session selected",
+        "Opens QFileDialog for save location",
+        "Calls ExcelExporter.export() with session data and test results",
+        "If TestPoints have excel_cell mappings, use template export mode",
+        "Otherwise use standard export with header and data table",
+        "Show success message with file path",
+        "Typecheck passes"
+      ],
+      "priority": 33,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-034",
+      "title": "DUT calibration history",
+      "description": "As a technician, I want to see all past calibrations for a specific DUT.",
+      "acceptanceCriteria": [
+        "History tab in DUT details shows calibrations for selected DUT",
+        "Query CalibrationSession where dut_id matches",
+        "Display in history_table: Date, Work Order, Technician, Result",
+        "Double-click opens session in Reports tab for full details",
+        "Typecheck passes"
+      ],
+      "priority": 34,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-035",
+      "title": "Update DUT after calibration",
+      "description": "As a technician, I want DUT records updated after successful calibration.",
+      "acceptanceCriteria": [
+        "On session completion with overall Pass, update DUT.last_calibration_date",
+        "Auto-calculate DUT.next_due_date = last_cal + calibration_interval_days",
+        "Refresh due date displays in DUTTab",
+        "Typecheck passes"
+      ],
+      "priority": 35,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-036",
+      "title": "User preferences dialog",
+      "description": "As a technician, I want to set my preferences.",
+      "acceptanceCriteria": [
+        "Preferences dialog from menu with tabs: General, Webcam, Display",
+        "General: Technician Name, Technician ID, Default Input Method",
+        "Webcam: Device selection dropdown (from WebcamCapture.list_cameras())",
+        "Save updates Settings via reload_settings()",
+        "Preferences saved to ~/.calsystem/config.json",
+        "Typecheck passes"
+      ],
+      "priority": 36,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-037",
+      "title": "Application logging and log viewer",
+      "description": "As an administrator, I want to view application logs.",
+      "acceptanceCriteria": [
+        "Log viewer dialog accessible from Help > View Logs",
+        "Reads log files from ~/.calsystem/logs/",
+        "QTextEdit displays log contents with scroll to bottom",
+        "Refresh button reloads current log file",
+        "Log level dropdown filters displayed entries",
+        "Typecheck passes"
+      ],
+      "priority": 37,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-038",
+      "title": "Add wiring diagrams to procedures",
+      "description": "As a technician, I want to add wiring diagram images to procedures.",
+      "acceptanceCriteria": [
+        "Add Wiring Diagram button in ProceduresTab opens file dialog for images",
+        "Creates WiringDiagram record linked to procedure and optional section",
+        "Stores image as binary in database or saves to resources/images with path reference",
+        "Thumbnails shown in procedure builder",
+        "During execution, wiring_label displays image for current section",
+        "Typecheck passes"
+      ],
+      "priority": 38,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}

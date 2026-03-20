@@ -1,0 +1,48 @@
+# Calsystem - Calibration Management System
+# Python 3.10+ required
+
+# GUI Framework
+PyQt6>=6.6.0
+PyQt6-Qt6>=6.6.0
+
+# Database
+mysql-connector-python>=8.2.0
+SQLAlchemy>=2.0.23
+
+# Instrument Control
+PyVISA>=1.14.1
+PyVISA-py>=0.7.1  # Pure Python VISA backend (fallback)
+
+# OCR and Computer Vision
+opencv-python>=4.8.0
+pytesseract>=0.3.10
+easyocr>=1.7.1  # Alternative OCR with better 7-segment support
+numpy>=1.26.0
+Pillow>=10.1.0
+
+# PDF Generation
+reportlab>=4.0.7
+WeasyPrint>=60.1  # Alternative PDF with CSS support
+
+# Excel Handling
+openpyxl>=3.1.2
+xlrd>=2.0.1  # For reading older .xls files
+
+# Configuration
+python-dotenv>=1.0.0
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+
+# Logging and Utilities
+loguru>=0.7.2
+rich>=13.7.0  # Better console output during development
+
+# Testing
+pytest>=7.4.3
+pytest-qt>=4.2.0
+pytest-cov>=4.1.0
+
+# Development
+black>=23.12.0
+isort>=5.13.0
+mypy>=1.7.0

@@ -1,0 +1,93 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "calsystem"
+version = "0.1.0"
+description = "Calibration Management System - A MetCal-like application for calibration laboratories"
+readme = "README.md"
+license = {text = "Proprietary"}
+requires-python = ">=3.10"
+authors = [
+    {name = "Calibration Lab"}
+]
+keywords = ["calibration", "metrology", "GPIB", "VISA", "laboratory"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering",
+]
+
+dependencies = [
+    "PyQt6>=6.6.0",
+    "mysql-connector-python>=8.2.0",
+    "SQLAlchemy>=2.0.23",
+    "PyVISA>=1.14.1",
+    "opencv-python>=4.8.0",
+    "pytesseract>=0.3.10",
+    "numpy>=1.26.0",
+    "Pillow>=10.1.0",
+    "reportlab>=4.0.7",
+    "openpyxl>=3.1.2",
+    "python-dotenv>=1.0.0",
+    "pydantic>=2.5.0",
+    "pydantic-settings>=2.1.0",
+    "loguru>=0.7.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.3",
+    "pytest-qt>=4.2.0",
+    "pytest-cov>=4.1.0",
+    "black>=23.12.0",
+    "isort>=5.13.0",
+    "mypy>=1.7.0",
+]
+ocr-advanced = [
+    "easyocr>=1.7.1",
+]
+
+[project.scripts]
+calsystem = "calsystem.main:main"
+
+[project.gui-scripts]
+calsystem-gui = "calsystem.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.black]
+line-length = 100
+target-version = ['py310', 'py311', 'py312']
+include = '\.pyi?$'
+exclude = '''
+/(
+    \.git
+    | \.venv
+    | build
+    | dist
+)/
+'''
+
+[tool.isort]
+profile = "black"
+line_length = 100
+src_paths = ["src", "tests"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-v --tb=short"
