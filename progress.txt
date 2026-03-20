@@ -2,14 +2,42 @@
 
 ## Project: Calsystem - Calibration Management System
 ## Branch: ralph/calsystem-mvp
-## Started:
+## Started: 2026-03-20
+
+---
+
+## Codebase Patterns
+
+- Settings are stored in ~/.calsystem/config.json as JSON
+- Use get_settings() from calsystem.config.settings for accessing settings (cached)
+- Use reload_settings() to reload settings after changes
+- Database connection via get_db() returns singleton DatabaseManager
+- UI dialogs go in src/calsystem/ui/dialogs/ directory
+- PyQt6 dialogs should be modal and use QDialogButtonBox for standard buttons
 
 ---
 
 ## Story Progress
 
-(Ralph will update this file as stories are completed)
-
+## 2026-03-20 - US-001
+- What was implemented:
+  - Created SettingsDialog (src/calsystem/ui/dialogs/settings_dialog.py) with database connection fields
+  - Test Connection button validates MySQL connectivity via DatabaseManager
+  - Settings saved to ~/.calsystem/config.json
+  - Updated settings.py to load config from JSON file on startup
+  - Updated app.py to load settings and attempt database connection on startup
+  - Status bar shows connection status (green/red)
+- Files changed:
+  - src/calsystem/ui/dialogs/__init__.py (new)
+  - src/calsystem/ui/dialogs/settings_dialog.py (new)
+  - src/calsystem/config/settings.py (modified)
+  - src/calsystem/app.py (modified)
+- **Learnings for future iterations:**
+  - Settings class uses _load_config_from_file() helper to read JSON before Pydantic initialization
+  - Nested settings (database, instruments, ocr, ui) each have their own Pydantic model class
+  - DatabaseManager is a singleton - use get_db() to get instance
+  - SettingsDialog connected via File > Settings menu with Ctrl+, shortcut
+  - Status bar has db_status_label and workstation_label permanent widgets
 ---
 
 ## Notes
