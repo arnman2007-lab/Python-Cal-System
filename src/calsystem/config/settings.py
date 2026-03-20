@@ -2,12 +2,14 @@
 Application settings management using Pydantic.
 """
 
+import json
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 from functools import lru_cache
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from loguru import logger
 
 
 class DatabaseSettings(BaseSettings):
@@ -52,6 +54,22 @@ class UISettings(BaseSettings):
     show_tooltips: bool = True
 
 
+def _get_config_dir() -> Path:
+    """Get the config directory path."""
+    return Path.home() / ".calsystem"
+
+
+def _load_config_from_file() -> dict[str, Any]:
+    """Load configuration from JSON file if it exists."""
+    config_file = _get_config_dir() / "config.json"
+    if config_file.exists():
+        try:
+            return json.loads(config_file.read_text())
+        except (json.JSONDecodeError, IOError) as e:
+            logger.warning(f"Failed to load config file: {e}")
+    return {}
+
+
 class Settings(BaseSettings):
     """Main application settings."""
 
@@ -70,7 +88,7 @@ class Settings(BaseSettings):
     ui: UISettings = Field(default_factory=UISettings)
 
     # Application paths
-    config_dir: Path = Field(default_factory=lambda: Path.home() / ".calsystem")
+    config_dir: Path = Field(default_factory=_get_config_dir)
     data_dir: Path = Field(default_factory=lambda: Path.home() / ".calsystem" / "data")
     log_dir: Path = Field(default_factory=lambda: Path.home() / ".calsystem" / "logs")
 
@@ -82,6 +100,25 @@ class Settings(BaseSettings):
     workstation_name: str = ""
 
     def __init__(self, **kwargs):
+        # Load config from file first
+        file_config = _load_config_from_file()
+
+        # Merge file config with any provided kwargs
+        # File config has lower priority than explicit kwargs
+        if "database" not in kwargs and "database" in file_config:
+            kwargs["database"] = DatabaseSettings(**file_config["database"])
+        if "instruments" not in kwargs and "instruments" in file_config:
+            kwargs["instruments"] = InstrumentSettings(**file_config["instruments"])
+        if "ocr" not in kwargs and "ocr" in file_config:
+            kwargs["ocr"] = OCRSettings(**file_config["ocr"])
+        if "ui" not in kwargs and "ui" in file_config:
+            kwargs["ui"] = UISettings(**file_config["ui"])
+
+        # Load top-level settings from file
+        for key in ["technician_name", "technician_id", "workstation_name"]:
+            if key not in kwargs and key in file_config:
+                kwargs[key] = file_config[key]
+
         super().__init__(**kwargs)
         # Ensure directories exist
         self.config_dir.mkdir(parents=True, exist_ok=True)

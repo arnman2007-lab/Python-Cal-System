@@ -19,6 +19,9 @@ from PyQt6.QtGui import QAction, QIcon
 from PyQt6.QtCore import Qt, QSize
 from loguru import logger
 
+from calsystem.config.settings import get_settings
+from calsystem.database.connection import get_db
+
 
 class CalsystemApp(QMainWindow):
     """Main application window."""
@@ -34,7 +37,36 @@ class CalsystemApp(QMainWindow):
         self._init_central_widget()
         self._init_status_bar()
 
+        # Load settings and try to connect to database
+        self._load_settings_and_connect()
+
         logger.info("Main window initialized")
+
+    def _load_settings_and_connect(self):
+        """Load settings and attempt database connection on startup."""
+        settings = get_settings()
+        logger.info(f"Settings loaded from {settings.config_dir}")
+
+        # Try to connect to database if settings are configured
+        if settings.database.host and settings.database.database:
+            db = get_db()
+            try:
+                if db.connect():
+                    self._update_db_status(True)
+                else:
+                    self._update_db_status(False)
+            except Exception as e:
+                logger.warning(f"Database connection on startup failed: {e}")
+                self._update_db_status(False)
+
+    def _update_db_status(self, connected: bool):
+        """Update the database connection status in the status bar."""
+        if connected:
+            self.db_status_label.setText("Database: Connected")
+            self.db_status_label.setStyleSheet("color: green;")
+        else:
+            self.db_status_label.setText("Database: Not Connected")
+            self.db_status_label.setStyleSheet("color: red;")
 
     def _init_menu_bar(self):
         """Initialize the menu bar."""
@@ -196,7 +228,27 @@ class CalsystemApp(QMainWindow):
     def _on_settings(self):
         """Open settings dialog."""
         logger.info("Settings dialog requested")
-        # TODO: Implement settings dialog
+        from calsystem.ui.dialogs.settings_dialog import SettingsDialog
+
+        dialog = SettingsDialog(self)
+        if dialog.exec():
+            # Settings were saved, try to reconnect to database
+            db = get_db()
+            try:
+                if db.connect():
+                    self._update_db_status(True)
+                    self.status_bar.showMessage("Database connection established", 3000)
+                else:
+                    self._update_db_status(False)
+                    self.status_bar.showMessage("Database connection failed", 3000)
+            except Exception as e:
+                logger.error(f"Database connection failed: {e}")
+                self._update_db_status(False)
+                QMessageBox.warning(
+                    self,
+                    "Connection Error",
+                    f"Failed to connect to database:\n{e}",
+                )
 
     def _on_scan_instruments(self):
         """Scan for connected instruments."""
