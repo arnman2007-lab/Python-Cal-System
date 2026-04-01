@@ -1,0 +1,37 @@
+# Calsystem Build Dependencies
+# Install with: pip install -r requirements-build.txt
+
+# Build tool
+pyinstaller>=6.3.0
+
+# Core UI
+PyQt6>=6.6.0
+
+# Database
+mysql-connector-python>=8.2.0
+SQLAlchemy>=2.0.23
+
+# Instruments
+PyVISA>=1.14.1
+PyVISA-py>=0.7.1
+
+# OCR and Image Processing
+opencv-python>=4.8.0
+pytesseract>=0.3.10
+numpy>=1.26.0
+Pillow>=10.1.0
+
+# Reports
+reportlab>=4.0.7
+openpyxl>=3.1.2
+
+# Configuration
+python-dotenv>=1.0.0
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+
+# Logging
+loguru>=0.7.2
+
+# Serial communication (for PyVISA-py)
+pyserial>=3.5

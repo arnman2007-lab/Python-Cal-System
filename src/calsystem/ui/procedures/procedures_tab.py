@@ -30,8 +30,12 @@ from PyQt6.QtCore import Qt
 from loguru import logger
 
 from calsystem.database.connection import get_db
-from calsystem.database.models import Procedure, TestSection, TestPoint, CommandBank, ToleranceType, WiringDiagram
+from calsystem.database.models import (
+    Procedure, TestSection, TestPoint, CommandBank, ToleranceType, WiringDiagram,
+    Standard, WorkstationStandard, WorkstationConfig, DeviceGroupType
+)
 from calsystem.ui.dialogs.excel_import_dialog import ExcelImportDialog
+from calsystem.instruments.visa_manager import get_visa_manager, PYVISA_AVAILABLE
 
 
 class ProceduresTab(QWidget):
@@ -258,6 +262,20 @@ class ProceduresTab(QWidget):
         self.save_tp_btn = QPushButton("Save Test Point")
         self.save_tp_btn.clicked.connect(self._save_current_testpoint)
         details_layout.addRow("", self.save_tp_btn)
+
+        # Test output button - sends commands to calibrator
+        test_btn_layout = QHBoxLayout()
+        self.test_output_btn = QPushButton("Test Output")
+        self.test_output_btn.setToolTip("Send source command to calibrator to verify it works")
+        self.test_output_btn.clicked.connect(self._on_test_output)
+        test_btn_layout.addWidget(self.test_output_btn)
+
+        self.standby_btn = QPushButton("Standby")
+        self.standby_btn.setToolTip("Put calibrator in standby mode")
+        self.standby_btn.clicked.connect(self._on_standby)
+        test_btn_layout.addWidget(self.standby_btn)
+
+        details_layout.addRow("Calibrator:", test_btn_layout)
 
         main_splitter.addWidget(details_group)
 
@@ -1051,3 +1069,170 @@ class ProceduresTab(QWidget):
         except Exception as e:
             logger.error(f"Failed to add wiring diagram: {e}")
             QMessageBox.critical(self, "Error", f"Failed to add wiring diagram:\n{e}")
+
+    def _get_calibrator_address(self) -> Optional[str]:
+        """Get the VISA address of a calibrator from workstation standards."""
+        db = get_db()
+        if not db.is_connected:
+            return None
+
+        try:
+            from calsystem.config.settings import get_settings
+            settings = get_settings()
+            workstation_name = settings.workstation_name or "Default Workstation"
+
+            with db.session() as session:
+                # Get workstation config
+                config = session.query(WorkstationConfig).filter(
+                    WorkstationConfig.name == workstation_name
+                ).first()
+
+                if not config:
+                    return None
+
+                # Find a calibrator in the workstation standards
+                ws_standards = session.query(WorkstationStandard).filter(
+                    WorkstationStandard.workstation_config_id == config.id
+                ).all()
+
+                for ws_std in ws_standards:
+                    standard = session.query(Standard).filter(
+                        Standard.id == ws_std.standard_id
+                    ).first()
+
+                    if standard and standard.device_group == DeviceGroupType.calibrator:
+                        return ws_std.visa_address
+
+                # If no calibrator found, return first standard with an address
+                for ws_std in ws_standards:
+                    if ws_std.visa_address:
+                        return ws_std.visa_address
+
+                return None
+
+        except Exception as e:
+            logger.error(f"Failed to get calibrator address: {e}")
+            return None
+
+    def _substitute_placeholders(self, command: str) -> str:
+        """Substitute {value}, {unit}, {frequency} placeholders in command."""
+        if not command:
+            return ""
+
+        value = self.nominal_input.value()
+        unit = self.unit_combo.currentText()
+        frequency = self.frequency_input.value()
+
+        # Handle frequency unit conversion
+        freq_unit = self.freq_unit_combo.currentText()
+        if freq_unit == "kHz":
+            frequency *= 1000
+        elif freq_unit == "MHz":
+            frequency *= 1000000
+
+        result = command
+        result = result.replace("{value}", str(value))
+        result = result.replace("{unit}", unit)
+        result = result.replace("{frequency}", str(frequency) if frequency > 0 else "")
+
+        return result
+
+    def _on_test_output(self):
+        """Test the current test point by sending commands to calibrator."""
+        if not PYVISA_AVAILABLE:
+            QMessageBox.warning(
+                self, "PyVISA Not Available",
+                "PyVISA is not installed. Cannot communicate with instruments."
+            )
+            return
+
+        # Get calibrator address
+        address = self._get_calibrator_address()
+        if not address:
+            QMessageBox.warning(
+                self, "No Calibrator",
+                "No calibrator found in workstation standards.\n\n"
+                "Please add a calibrator to your workstation in the Workstation tab first."
+            )
+            return
+
+        # Get commands from form
+        source_cmd = self._substitute_placeholders(self.source_cmd_input.text())
+        operate_cmd = self.operate_cmd_input.text().strip()
+
+        if not source_cmd:
+            QMessageBox.warning(
+                self, "No Source Command",
+                "No source command defined for this test point.\n\n"
+                "Enter a source command like 'OUT {value} {unit}' and try again."
+            )
+            return
+
+        logger.info(f"Testing output: {source_cmd} to {address}")
+
+        visa = get_visa_manager()
+        errors = []
+        success_msgs = []
+
+        # Send source command
+        if visa.write(address, source_cmd):
+            success_msgs.append(f"Source: {source_cmd}")
+        else:
+            errors.append(f"Failed to send source command: {source_cmd}")
+
+        # Send operate command if defined
+        if operate_cmd and not errors:
+            if visa.write(address, operate_cmd):
+                success_msgs.append(f"Operate: {operate_cmd}")
+            else:
+                errors.append(f"Failed to send operate command: {operate_cmd}")
+
+        # Show result
+        if errors:
+            QMessageBox.critical(
+                self, "Test Failed",
+                "Errors occurred:\n\n" + "\n".join(errors)
+            )
+        else:
+            value = self.nominal_input.value()
+            unit = self.unit_combo.currentText()
+            freq = self.frequency_input.value()
+            freq_unit = self.freq_unit_combo.currentText()
+
+            output_desc = f"{value} {unit}"
+            if freq > 0:
+                output_desc += f" @ {freq} {freq_unit}"
+
+            QMessageBox.information(
+                self, "Test Output Success",
+                f"Calibrator is now outputting:\n\n"
+                f"   {output_desc}\n\n"
+                f"Commands sent:\n" + "\n".join(f"   {m}" for m in success_msgs) +
+                f"\n\nClick 'Standby' when done to turn off the output."
+            )
+
+    def _on_standby(self):
+        """Put calibrator in standby mode."""
+        if not PYVISA_AVAILABLE:
+            return
+
+        address = self._get_calibrator_address()
+        if not address:
+            QMessageBox.warning(self, "No Calibrator", "No calibrator found.")
+            return
+
+        # Get standby command - check operate field or use default
+        operate_cmd = self.operate_cmd_input.text().strip()
+        if operate_cmd:
+            # If operate is defined, try common standby alternatives
+            standby_cmd = "STBY"
+        else:
+            standby_cmd = "STBY"
+
+        logger.info(f"Sending standby to {address}")
+
+        visa = get_visa_manager()
+        if visa.write(address, standby_cmd):
+            QMessageBox.information(self, "Standby", "Calibrator is now in standby mode.")
+        else:
+            QMessageBox.warning(self, "Standby Failed", "Failed to send standby command.")
