@@ -45,6 +45,7 @@ echo.
 pyinstaller --onefile --windowed ^
     --name "Calsystem" ^
     --add-data "resources;resources" ^
+    --add-data "Images;Images" ^
     --hidden-import "pyvisa_py" ^
     --hidden-import "mysql.connector" ^
     --hidden-import "sqlalchemy.sql.default_comparator" ^

@@ -2,6 +2,8 @@
 Test execution tab - where calibrations are performed.
 """
 
+import re
+import time
 from datetime import datetime
 from typing import Optional, List, Dict, Any
 
@@ -23,9 +25,12 @@ from PyQt6.QtWidgets import (
     QTextEdit,
     QFormLayout,
     QMessageBox,
+    QDialog,
+    QSizePolicy,
 )
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QFont, QColor
+from PyQt6.QtCore import Qt, QTimer, QSize, QPropertyAnimation, QEasingCurve
+from PyQt6.QtGui import QFont, QColor, QPixmap
+from PyQt6.QtWidgets import QGraphicsOpacityEffect
 from loguru import logger
 
 from calsystem.database.connection import get_db
@@ -36,9 +41,105 @@ from calsystem.database.models import (
     TestSection,
     TestPoint,
     TestResult,
+    TestStatus,
+    InputMethod,
     SessionStatus,
+    Standard,
+    WorkstationStandard,
+    WorkstationConfig,
+    DeviceGroupType,
+    CommandBank,
+    WiringDiagram,
+    WiringDiagramLibrary,
+    SectionDiagramLink,
 )
 from calsystem.config.settings import get_settings
+from calsystem.ui.dialogs.calibrator_selection_dialog import CalibratorSelectionDialog
+from calsystem.instruments.visa_manager import get_visa_manager, PYVISA_AVAILABLE
+
+
+class PassFailDialog(QDialog):
+    """Dialog for Pass/Fail test point verification."""
+
+    def __init__(self, prompt: str, test_info: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Pass/Fail Verification")
+        self.setModal(True)
+        self.setMinimumWidth(400)
+
+        self._result: Optional[bool] = None
+
+        layout = QVBoxLayout(self)
+
+        # Test info
+        info_label = QLabel(test_info)
+        info_label.setStyleSheet("font-weight: bold; font-size: 14px;")
+        info_label.setWordWrap(True)
+        layout.addWidget(info_label)
+
+        layout.addSpacing(10)
+
+        # Prompt message
+        prompt_label = QLabel(prompt or "Does this test point pass?")
+        prompt_label.setStyleSheet("font-size: 16px;")
+        prompt_label.setWordWrap(True)
+        prompt_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(prompt_label)
+
+        layout.addSpacing(20)
+
+        # Pass/Fail buttons
+        button_layout = QHBoxLayout()
+
+        self.fail_btn = QPushButton("FAIL")
+        self.fail_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #dc3545;
+                color: white;
+                font-size: 18px;
+                font-weight: bold;
+                padding: 15px 40px;
+                border-radius: 5px;
+            }
+            QPushButton:hover {
+                background-color: #c82333;
+            }
+        """)
+        self.fail_btn.clicked.connect(self._on_fail)
+        button_layout.addWidget(self.fail_btn)
+
+        button_layout.addSpacing(20)
+
+        self.pass_btn = QPushButton("PASS")
+        self.pass_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #28a745;
+                color: white;
+                font-size: 18px;
+                font-weight: bold;
+                padding: 15px 40px;
+                border-radius: 5px;
+            }
+            QPushButton:hover {
+                background-color: #218838;
+            }
+        """)
+        self.pass_btn.clicked.connect(self._on_pass)
+        button_layout.addWidget(self.pass_btn)
+
+        layout.addLayout(button_layout)
+
+    def _on_pass(self):
+        self._result = True
+        self.accept()
+
+    def _on_fail(self):
+        self._result = False
+        self.accept()
+
+    def get_result(self) -> Optional[bool]:
+        """Returns True for Pass, False for Fail, None if cancelled."""
+        return self._result
 
 
 class ExecutionTab(QWidget):
@@ -51,6 +152,12 @@ class ExecutionTab(QWidget):
         self._current_procedure_id: Optional[int] = None
         self._test_points: List[Dict[str, Any]] = []
         self._current_test_index: int = 0
+        self._current_section_id: Optional[int] = None  # Track section for wiring confirmation
+        # Calibrator selection for this session
+        self._selected_calibrator: Optional[Dict[str, Any]] = None
+        self._calibrator_commands: Optional[Dict[str, str]] = None
+        # Reference DMM for automated measurements
+        self._selected_dmm: Optional[Dict[str, Any]] = None
         self._init_ui()
         self._connect_signals()
 
@@ -59,6 +166,7 @@ class ExecutionTab(QWidget):
         super().showEvent(event)
         self._load_duts()
         self._load_procedures()
+        self._load_dmms()
 
     def _connect_signals(self):
         """Connect additional signals."""
@@ -117,6 +225,553 @@ class ExecutionTab(QWidget):
         except Exception as e:
             logger.error(f"Failed to load procedures: {e}")
 
+    def _load_dmms(self):
+        """Load DMMs from workstation standards into combo."""
+        current_data = self.dmm_combo.currentData()
+        self.dmm_combo.clear()
+        self.dmm_combo.addItem("-- Select DMM --", None)
+
+        db = get_db()
+        if not db.is_connected:
+            return
+
+        try:
+            from calsystem.config.settings import get_settings
+            settings = get_settings()
+            workstation_name = settings.workstation_name or "Default Workstation"
+
+            with db.session() as session:
+                config = session.query(WorkstationConfig).filter(
+                    WorkstationConfig.name == workstation_name
+                ).first()
+
+                if not config:
+                    return
+
+                # Only get ACTIVE standards
+                ws_standards = session.query(WorkstationStandard).filter(
+                    WorkstationStandard.workstation_id == config.id,
+                    WorkstationStandard.is_active != False  # Include True and NULL
+                ).all()
+
+                for ws_std in ws_standards:
+                    standard = session.query(Standard).filter(
+                        Standard.id == ws_std.standard_id
+                    ).first()
+
+                    # Only show active DMMs
+                    if standard and standard.device_group == DeviceGroupType.DMM:
+                        address = ws_std.visa_address or standard.visa_address or ""
+                        label = f"{standard.make} {standard.model}"
+                        if address:
+                            label += f" ({address})"
+                        self.dmm_combo.addItem(label, {
+                            "standard_id": standard.id,
+                            "make": standard.make,
+                            "model": standard.model,
+                            "address": address,
+                        })
+
+                # Restore selection
+                if current_data:
+                    for i in range(self.dmm_combo.count()):
+                        data = self.dmm_combo.itemData(i)
+                        if data and data.get("standard_id") == current_data.get("standard_id"):
+                            self.dmm_combo.setCurrentIndex(i)
+                            break
+
+        except Exception as e:
+            logger.error(f"Failed to load DMMs: {e}")
+
+    def _on_dmm_selected(self, index: int):
+        """Handle DMM selection."""
+        data = self.dmm_combo.currentData()
+        if data:
+            self._selected_dmm = data
+            logger.info(f"Selected DMM: {data['make']} {data['model']} at {data['address']}")
+        else:
+            self._selected_dmm = None
+
+    def _on_init_dmm(self):
+        """Initialize the selected DMM with RESET and END ALWAYS."""
+        if not self._selected_dmm:
+            QMessageBox.warning(self, "No DMM", "Please select a Reference DMM first.")
+            return
+
+        address = self._selected_dmm.get("address")
+        if not address:
+            QMessageBox.warning(self, "No Address", "Selected DMM has no VISA address.")
+            return
+
+        visa = get_visa_manager()
+        make = self._selected_dmm.get("make", "").lower()
+        model = self._selected_dmm.get("model", "").lower()
+
+        self.status_display.append(f"Initializing {self._selected_dmm['make']} {self._selected_dmm['model']}...")
+
+        # HP/Agilent/Keysight 3458A specific initialization
+        if "3458" in model:
+            # RESET - returns to power-on state
+            if visa.write(address, "RESET"):
+                self.status_display.append("  RESET - OK")
+            else:
+                self.status_display.append("  RESET - FAILED")
+                return
+
+            # END ALWAYS - send EOI with every reading (critical for GPIB)
+            if visa.write(address, "END ALWAYS"):
+                self.status_display.append("  END ALWAYS - OK")
+            else:
+                self.status_display.append("  END ALWAYS - FAILED")
+                return
+
+            # OFORMAT ASCII - ASCII output format
+            if visa.write(address, "OFORMAT ASCII"):
+                self.status_display.append("  OFORMAT ASCII - OK")
+            else:
+                self.status_display.append("  OFORMAT ASCII - FAILED")
+
+            # Verify communication with ID query
+            success, response = visa.query(address, "ID?")
+            if success:
+                self.status_display.append(f"  ID: {response.strip()}")
+                QMessageBox.information(
+                    self, "DMM Initialized",
+                    f"3458A initialized successfully!\n\nID: {response.strip()}"
+                )
+            else:
+                self.status_display.append("  ID query failed")
+        else:
+            # Generic SCPI initialization for other DMMs
+            if visa.write(address, "*RST"):
+                self.status_display.append("  *RST - OK")
+            if visa.write(address, "*CLS"):
+                self.status_display.append("  *CLS - OK")
+
+            success, response = visa.query(address, "*IDN?")
+            if success:
+                self.status_display.append(f"  IDN: {response.strip()}")
+                QMessageBox.information(
+                    self, "DMM Initialized",
+                    f"DMM initialized successfully!\n\n{response.strip()}"
+                )
+
+    def _convert_to_test_unit(self, value: float, target_unit: str) -> float:
+        """
+        Convert a reading from base units to the test point's unit.
+
+        The 3458A returns values in base units (V, A, Ohm).
+        This converts to mV, µV, mA, µA, kOhm, MOhm, etc.
+
+        Args:
+            value: Reading in base units from DMM
+            target_unit: The unit specified in the test point
+
+        Returns:
+            Value converted to the target unit
+        """
+        # Define conversion multipliers (from base unit to target)
+        conversions = {
+            # Voltage
+            "V": 1,
+            "mV": 1000,           # 1 V = 1000 mV
+            "µV": 1000000,        # 1 V = 1000000 µV
+            "uV": 1000000,        # alternate spelling
+            # Current
+            "A": 1,
+            "mA": 1000,           # 1 A = 1000 mA
+            "µA": 1000000,        # 1 A = 1000000 µA
+            "uA": 1000000,        # alternate spelling
+            # Resistance
+            "Ohm": 1,
+            "kOhm": 0.001,        # 1 Ohm = 0.001 kOhm
+            "MOhm": 0.000001,     # 1 Ohm = 0.000001 MOhm
+            # Frequency (if ever needed)
+            "Hz": 1,
+            "kHz": 0.001,
+            "MHz": 0.000001,
+        }
+
+        multiplier = conversions.get(target_unit, 1)
+        return value * multiplier
+
+    def _query_dmm(self, function: str = "DCV") -> Optional[float]:
+        """
+        Query the selected DMM for a reading.
+
+        Args:
+            function: Measurement function (DCV, ACV, OHM, OHMF)
+
+        Returns:
+            Reading as float (in base units), or None if failed.
+        """
+        if not self._selected_dmm:
+            return None
+
+        address = self._selected_dmm.get("address")
+        if not address:
+            return None
+
+        visa = get_visa_manager()
+        model = self._selected_dmm.get("model", "").lower()
+
+        # HP/Agilent/Keysight 3458A commands
+        if "3458" in model:
+            # Set function with auto-range
+            func_cmd = f"{function} AUTO"
+            if not visa.write(address, func_cmd):
+                logger.error(f"Failed to set function: {func_cmd}")
+                return None
+
+            # Trigger single reading
+            success, response = visa.query(address, "TRIG SGL")
+            if success and response:
+                try:
+                    return float(response.strip())
+                except ValueError:
+                    logger.error(f"Could not parse reading: {response}")
+                    return None
+        else:
+            # Generic SCPI DMM commands
+            func_map = {
+                "DCV": "MEAS:VOLT:DC?",
+                "ACV": "MEAS:VOLT:AC?",
+                "OHM": "MEAS:RES?",
+                "OHMF": "MEAS:FRES?",
+            }
+            cmd = func_map.get(function, "MEAS:VOLT:DC?")
+            success, response = visa.query(address, cmd)
+            if success and response:
+                try:
+                    return float(response.strip())
+                except ValueError:
+                    logger.error(f"Could not parse reading: {response}")
+                    return None
+
+        return None
+
+    # -------------------------------------------------------------------------
+    # Calibrator Detection and Selection
+    # -------------------------------------------------------------------------
+
+    def _get_workstation_calibrators(self) -> List[Dict[str, Any]]:
+        """Get active calibrators from workstation standards."""
+        db = get_db()
+        if not db.is_connected:
+            return []
+
+        calibrators = []
+
+        try:
+            settings = get_settings()
+            workstation_name = settings.workstation_name or "Default Workstation"
+
+            with db.session() as session:
+                config = session.query(WorkstationConfig).filter(
+                    WorkstationConfig.name == workstation_name
+                ).first()
+
+                if not config:
+                    return []
+
+                # Only get ACTIVE standards (is_active = True or NULL for backwards compat)
+                ws_standards = session.query(WorkstationStandard).filter(
+                    WorkstationStandard.workstation_id == config.id,
+                    WorkstationStandard.is_active != False  # Include True and NULL
+                ).all()
+
+                command_banks = session.query(CommandBank.make, CommandBank.model).all()
+                cb_set = {(cb.make.lower(), cb.model.lower()) for cb in command_banks}
+
+                for ws_std in ws_standards:
+                    standard = session.query(Standard).filter(
+                        Standard.id == ws_std.standard_id
+                    ).first()
+
+                    if standard and standard.device_group == DeviceGroupType.CALIBRATOR:
+                        has_cb = (standard.make.lower(), standard.model.lower()) in cb_set
+                        calibrators.append({
+                            "standard_id": standard.id,
+                            "address": ws_std.visa_address or standard.visa_address or "",
+                            "make": standard.make,
+                            "model": standard.model,
+                            "serial": standard.serial_number or "",
+                            "has_command_bank": has_cb,
+                        })
+
+                logger.info(f"Found {len(calibrators)} active calibrators in workstation")
+                return calibrators
+
+        except Exception as e:
+            logger.error(f"Failed to get workstation calibrators: {e}")
+            return []
+
+    def _detect_connected_calibrators(self) -> List[Dict[str, Any]]:
+        """Check if active workstation calibrators are connected (fast - only checks known addresses)."""
+        if not PYVISA_AVAILABLE:
+            return []
+
+        workstation_cals = self._get_workstation_calibrators()
+        if not workstation_cals:
+            return []
+
+        visa = get_visa_manager()
+        connected_calibrators = []
+
+        # Only check the specific addresses we know about (much faster than scanning all)
+        for cal in workstation_cals:
+            cal_address = cal.get("address", "")
+            if not cal_address:
+                continue
+
+            logger.info(f"Checking calibrator at {cal_address}...")
+
+            # Try to identify this specific address
+            info = visa.identify(cal_address)
+            if info and info.is_connected:
+                cal["detected_address"] = info.address
+                cal["detected_make"] = info.manufacturer
+                cal["detected_model"] = info.model
+                connected_calibrators.append(cal)
+                logger.info(f"Found: {info.manufacturer} {info.model} at {cal_address}")
+            else:
+                logger.info(f"No response from {cal_address}")
+
+        return connected_calibrators
+
+    def _select_calibrator(self) -> Optional[Dict[str, Any]]:
+        """Select a calibrator for this session."""
+        # Use cached if available
+        if self._selected_calibrator:
+            return self._selected_calibrator
+
+        connected = self._detect_connected_calibrators()
+
+        if not connected:
+            QMessageBox.warning(
+                self, "No Calibrator Connected",
+                "No calibrators detected on the VISA bus.\n\n"
+                "Please check that:\n"
+                "1. Your calibrator is powered on\n"
+                "2. It's connected via GPIB/USB/LAN\n"
+                "3. It's added to your workstation standards\n"
+                "4. The Group is set to 'Calibrator'"
+            )
+            return None
+
+        if len(connected) == 1:
+            self._selected_calibrator = connected[0]
+            self._load_calibrator_commands()
+            logger.info(f"Auto-selected calibrator: {connected[0]['make']} {connected[0]['model']}")
+            return self._selected_calibrator
+
+        # Multiple - show selection dialog
+        dialog = CalibratorSelectionDialog(connected, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._selected_calibrator = dialog.get_selected_calibrator()
+            if self._selected_calibrator:
+                self._load_calibrator_commands()
+                return self._selected_calibrator
+
+        return None
+
+    def _load_calibrator_commands(self):
+        """Load command bank for the selected calibrator."""
+        if not self._selected_calibrator:
+            self._calibrator_commands = None
+            return
+
+        make = self._selected_calibrator.get("make", "")
+        model = self._selected_calibrator.get("model", "")
+
+        db = get_db()
+        if not db.is_connected:
+            self._calibrator_commands = None
+            return
+
+        try:
+            with db.session() as session:
+                command_bank = session.query(CommandBank).filter(
+                    CommandBank.make.ilike(make),
+                    CommandBank.model.ilike(model)
+                ).first()
+
+                if command_bank and command_bank.commands:
+                    self._calibrator_commands = command_bank.commands
+                    cmd_list = list(self._calibrator_commands.keys())
+                    logger.info(f"Loaded command bank for {make} {model}: {cmd_list}")
+                    self.status_display.append(f"Command bank loaded: {', '.join(cmd_list)}")
+                else:
+                    self._calibrator_commands = None
+                    logger.warning(f"No command bank found for {make} {model}")
+                    self.status_display.append(f"WARNING: No command bank for {make} {model}")
+
+        except Exception as e:
+            logger.error(f"Failed to load command bank: {e}")
+            self._calibrator_commands = None
+
+    def _get_calibrator_command(self, command_name: str) -> Optional[str]:
+        """Get a command from the calibrator's command bank."""
+        if not self._calibrator_commands:
+            return None
+
+        if command_name in self._calibrator_commands:
+            return self._calibrator_commands[command_name]
+
+        for key, value in self._calibrator_commands.items():
+            if key.lower() == command_name.lower():
+                return value
+
+        return None
+
+    def _get_calibrator_address(self) -> Optional[str]:
+        """Get the VISA address of the selected calibrator."""
+        if not self._selected_calibrator:
+            return None
+        return self._selected_calibrator.get("detected_address") or self._selected_calibrator.get("address")
+
+    def _send_calibrator_commands(self, source_cmd: str, operate_cmd: Optional[str] = None) -> bool:
+        """Send source and operate commands to calibrator."""
+        address = self._get_calibrator_address()
+        if not address:
+            return False
+
+        visa = get_visa_manager()
+        success = True
+
+        if source_cmd:
+            if visa.write(address, source_cmd):
+                self.status_display.append(f"Sent to calibrator: {source_cmd}")
+            else:
+                self.status_display.append(f"FAILED: {source_cmd}")
+                success = False
+
+        if operate_cmd and success:
+            if visa.write(address, operate_cmd):
+                self.status_display.append(f"Sent: {operate_cmd}")
+            else:
+                self.status_display.append(f"FAILED: {operate_cmd}")
+                success = False
+
+        return success
+
+    def _safe_shutdown_calibrator(self):
+        """Put calibrator into standby and reset for safe shutdown."""
+        if not self._selected_calibrator:
+            return
+
+        address = self._get_calibrator_address()
+        if not address:
+            return
+
+        visa = get_visa_manager()
+
+        self.status_display.append("Shutting down calibrator...")
+
+        # Use standard command names: STANDBY, RESET
+        stby_cmd = self._get_calibrator_command("STANDBY") or self._get_calibrator_command("STBY")
+        if stby_cmd:
+            if visa.write(address, stby_cmd):
+                self.status_display.append(f"Sent STANDBY: {stby_cmd}")
+            else:
+                self.status_display.append(f"WARNING: Failed to send STANDBY")
+
+        # Use RESET command from command bank, fallback to *RST
+        reset_cmd = self._get_calibrator_command("RESET") or "*RST"
+        if visa.write(address, reset_cmd):
+            self.status_display.append(f"Sent RESET: {reset_cmd}")
+        else:
+            self.status_display.append("WARNING: Failed to send RESET")
+
+        self.status_display.append("Calibrator in standby mode")
+
+    def _substitute_placeholders(self, command: str, tp: Dict[str, Any]) -> str:
+        """
+        Substitute placeholders in command with test point values.
+
+        Placeholders:
+            {value} - Nominal value (e.g., 10)
+            {unit} - Unit string (e.g., V, mV, A, Ohm)
+            {frequency} - Frequency value as stored (e.g., 1 if 1 kHz)
+            {freq_unit} - Frequency unit string (e.g., Hz, kHz, MHz)
+            {freq_hz} - Frequency converted to Hz (e.g., 1000 for 1 kHz)
+
+        If frequency > 0 and command doesn't contain frequency placeholders,
+        automatically appends ",{freq_hz} HZ" for AC outputs.
+        """
+        if not command:
+            return ""
+
+        value = tp.get("nominal_value", 0)
+        unit = tp.get("unit", "")
+        frequency = tp.get("frequency", 0) or 0
+        freq_unit = tp.get("frequency_unit", "Hz")
+
+        # Calculate frequency in Hz
+        freq_hz = frequency
+        if freq_unit == "kHz":
+            freq_hz = frequency * 1000
+        elif freq_unit == "MHz":
+            freq_hz = frequency * 1000000
+
+        result = command
+
+        # Auto-append frequency for AC outputs if command doesn't have frequency placeholder
+        has_freq_placeholder = "{freq" in command or "{frequency}" in command
+        if freq_hz > 0 and not has_freq_placeholder:
+            # Append frequency in Fluke-style format: OUT 1 V,60 HZ
+            result = result + ",{freq_hz} HZ"
+
+        result = result.replace("{value}", str(value))
+        result = result.replace("{unit}", unit)
+        result = result.replace("{frequency}", str(frequency) if frequency > 0 else "")
+        result = result.replace("{freq_unit}", freq_unit if frequency > 0 else "")
+        result = result.replace("{freq_hz}", str(int(freq_hz)) if freq_hz > 0 else "")
+
+        return result
+
+    def _substitute_pre_placeholders(self, command: str, tp: Dict[str, Any]) -> str:
+        """
+        Substitute placeholders using pre-conditioning values.
+        Used to build the pre-conditioning command.
+        """
+        if not command:
+            return ""
+
+        value = tp.get("pre_nominal_value", 0) or 0
+        unit = tp.get("pre_unit", "") or ""
+        frequency = tp.get("pre_frequency", 0) or 0
+        freq_unit = tp.get("pre_frequency_unit", "Hz") or "Hz"
+
+        # Calculate frequency in Hz
+        freq_hz = frequency
+        if freq_unit == "kHz":
+            freq_hz = frequency * 1000
+        elif freq_unit == "MHz":
+            freq_hz = frequency * 1000000
+
+        result = command
+
+        # Auto-append frequency for AC outputs if command doesn't have frequency placeholder
+        has_freq_placeholder = "{freq" in command or "{frequency}" in command
+        if freq_hz > 0 and not has_freq_placeholder:
+            result = result + ",{freq_hz} HZ"
+
+        result = result.replace("{value}", str(value))
+        result = result.replace("{unit}", unit)
+        result = result.replace("{frequency}", str(frequency) if frequency > 0 else "")
+        result = result.replace("{freq_unit}", freq_unit if frequency > 0 else "")
+        result = result.replace("{freq_hz}", str(int(freq_hz)) if freq_hz > 0 else "")
+
+        return result
+
+    def _has_preconditioning(self, tp: Dict[str, Any]) -> bool:
+        """Check if test point has pre-conditioning configured."""
+        pre_val = tp.get("pre_nominal_value")
+        return pre_val is not None and pre_val != 0
+
+    # -------------------------------------------------------------------------
+
     def _on_dut_selected(self, index: int):
         """Handle DUT selection - auto-select assigned procedure."""
         dut_id = self.dut_combo.currentData()
@@ -155,25 +810,27 @@ class ExecutionTab(QWidget):
         """Initialize the UI."""
         layout = QVBoxLayout(self)
 
-        # Session setup bar
-        setup_group = QGroupBox("Session Setup")
-        setup_layout = QHBoxLayout(setup_group)
+        # Session setup bar - compact single row
+        setup_layout = QHBoxLayout()
+        setup_layout.setContentsMargins(5, 2, 5, 2)
+        setup_layout.setSpacing(10)
 
         setup_layout.addWidget(QLabel("DUT:"))
         self.dut_combo = QComboBox()
-        self.dut_combo.setMinimumWidth(200)
+        self.dut_combo.setMinimumWidth(180)
         self.dut_combo.setEditable(True)
-        self.dut_combo.setPlaceholderText("Select or enter asset number...")
+        self.dut_combo.setPlaceholderText("Select DUT...")
         setup_layout.addWidget(self.dut_combo)
 
-        setup_layout.addWidget(QLabel("Work Order:"))
+        setup_layout.addWidget(QLabel("WO:"))
         self.workorder_input = QLineEdit()
-        self.workorder_input.setMaximumWidth(150)
+        self.workorder_input.setMaximumWidth(120)
+        self.workorder_input.setPlaceholderText("Work order")
         setup_layout.addWidget(self.workorder_input)
 
         setup_layout.addWidget(QLabel("Procedure:"))
         self.procedure_combo = QComboBox()
-        self.procedure_combo.setMinimumWidth(200)
+        self.procedure_combo.setMinimumWidth(180)
         setup_layout.addWidget(self.procedure_combo)
 
         setup_layout.addStretch()
@@ -182,7 +839,12 @@ class ExecutionTab(QWidget):
         self.start_btn.clicked.connect(self._on_start_session)
         setup_layout.addWidget(self.start_btn)
 
-        layout.addWidget(setup_group)
+        self.continue_btn = QPushButton("Continue Session")
+        self.continue_btn.clicked.connect(self._on_continue_session)
+        self.continue_btn.setToolTip("Resume a previous incomplete session")
+        setup_layout.addWidget(self.continue_btn)
+
+        layout.addLayout(setup_layout)
 
         # Main execution area
         main_splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -196,18 +858,82 @@ class ExecutionTab(QWidget):
         current_group = QGroupBox("Current Test Point")
         current_layout = QVBoxLayout(current_group)
 
-        # Big display for nominal value
+        # Layout for nominal display + high voltage warning side by side
+        nominal_hv_layout = QHBoxLayout()
+
+        # Big display for nominal value - scales with window size
         self.nominal_display = QLabel("-- V")
         self.nominal_display.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        font = QFont()
-        font.setPointSize(36)
-        font.setBold(True)
-        self.nominal_display.setFont(font)
+        self.nominal_display.setWordWrap(True)
+        self.nominal_display.setMinimumHeight(80)
         self.nominal_display.setStyleSheet(
-            "QLabel { background-color: #2d2d2d; color: #00ff00; "
-            "padding: 20px; border-radius: 10px; }"
+            "QLabel { "
+            "  background-color: #2d2d2d; "
+            "  color: #00ff00; "
+            "  font-size: 28px; "
+            "  font-weight: bold; "
+            "  padding: 15px; "
+            "  border-radius: 10px; "
+            "  qproperty-alignment: AlignCenter; "
+            "}"
         )
-        current_layout.addWidget(self.nominal_display)
+        nominal_hv_layout.addWidget(self.nominal_display, stretch=1)
+
+        # High Voltage Warning - hidden by default
+        self.hv_warning_label = QLabel()
+        self.hv_warning_label.setFixedSize(100, 100)
+        self.hv_warning_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.hv_warning_label.setVisible(False)
+
+        # Load the high voltage image
+        import os
+        import sys
+        # Handle both development mode and PyInstaller bundled mode
+        if getattr(sys, 'frozen', False):
+            # Running as bundled exe - resources are in _MEIPASS
+            base_path = sys._MEIPASS
+        else:
+            # Running in development - go up from execution_tab.py to project root
+            base_path = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))))
+        hv_image_path = os.path.join(base_path, "resources", "images", "HighVoltage.png")
+        if os.path.exists(hv_image_path):
+            pixmap = QPixmap(hv_image_path)
+            self._hv_pixmap = pixmap.scaled(
+                QSize(120, 120),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            )
+            self.hv_warning_label.setPixmap(self._hv_pixmap)
+        else:
+            self._hv_pixmap = None
+            self.hv_warning_label.setText("⚡HV⚡")
+            self.hv_warning_label.setStyleSheet("color: red; font-weight: bold; font-size: 14px;")
+
+        # Opacity effect for fading animation
+        self._hv_opacity_effect = QGraphicsOpacityEffect()
+        self._hv_opacity_effect.setOpacity(1.0)
+        self.hv_warning_label.setGraphicsEffect(self._hv_opacity_effect)
+
+        # Fade animations
+        self._hv_fade_out = QPropertyAnimation(self._hv_opacity_effect, b"opacity")
+        self._hv_fade_out.setEasingCurve(QEasingCurve.Type.InOutQuad)
+        self._hv_fade_in = QPropertyAnimation(self._hv_opacity_effect, b"opacity")
+        self._hv_fade_in.setEasingCurve(QEasingCurve.Type.InOutQuad)
+
+        # Chain animations
+        self._hv_fade_out.finished.connect(self._start_hv_fade_in)
+        self._hv_fade_in.finished.connect(self._start_hv_fade_out_delayed)
+
+        # Delay timer
+        self._hv_delay_timer = QTimer()
+        self._hv_delay_timer.setSingleShot(True)
+        self._hv_delay_timer.timeout.connect(self._start_hv_fade_out)
+
+        self._hv_warning_active = False
+
+        nominal_hv_layout.addWidget(self.hv_warning_label)
+
+        current_layout.addLayout(nominal_hv_layout)
 
         # Test info
         info_layout = QFormLayout()
@@ -224,31 +950,35 @@ class ExecutionTab(QWidget):
 
         left_layout.addWidget(current_group)
 
-        # Instrument status
+        # Instrument status - compact
         status_group = QGroupBox("Instrument Status")
         status_layout = QVBoxLayout(status_group)
+        status_layout.setContentsMargins(5, 5, 5, 5)
 
         self.status_display = QTextEdit()
         self.status_display.setReadOnly(True)
-        self.status_display.setMaximumHeight(100)
-        self.status_display.setPlaceholderText("Instrument status will appear here...")
+        self.status_display.setMaximumHeight(80)
+        self.status_display.setPlaceholderText("Status messages...")
         status_layout.addWidget(self.status_display)
 
-        left_layout.addWidget(status_group)
+        left_layout.addWidget(status_group, stretch=0)
 
-        # Wiring diagram placeholder
+        # Wiring diagram - larger display
         wiring_group = QGroupBox("Wiring Diagram")
         wiring_layout = QVBoxLayout(wiring_group)
+        wiring_layout.setContentsMargins(5, 5, 5, 5)
 
         self.wiring_label = QLabel("No wiring diagram available")
         self.wiring_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.wiring_label.setMinimumHeight(150)
+        self.wiring_label.setMinimumHeight(250)
+        self.wiring_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.wiring_label.setStyleSheet(
-            "QLabel { background-color: #f0f0f0; border: 1px solid #ccc; }"
+            "QLabel { background-color: #f5f5f5; border: 1px solid #ccc; border-radius: 5px; }"
         )
+        self.wiring_label.setScaledContents(False)  # We'll handle scaling in _display_diagram_image
         wiring_layout.addWidget(self.wiring_label)
 
-        left_layout.addWidget(wiring_group)
+        left_layout.addWidget(wiring_group, stretch=2)  # Give wiring diagram more space
 
         # Input method selection and reading
         input_group = QGroupBox("Reading Input")
@@ -262,6 +992,23 @@ class ExecutionTab(QWidget):
         method_layout.addWidget(self.input_method_combo)
         method_layout.addStretch()
         input_layout.addLayout(method_layout)
+
+        # Reference DMM selector (for remote reading)
+        dmm_layout = QHBoxLayout()
+        dmm_layout.addWidget(QLabel("Reference DMM:"))
+        self.dmm_combo = QComboBox()
+        self.dmm_combo.addItem("-- Select DMM --", None)
+        self.dmm_combo.currentIndexChanged.connect(self._on_dmm_selected)
+        dmm_layout.addWidget(self.dmm_combo)
+
+        self.init_dmm_btn = QPushButton("Init")
+        self.init_dmm_btn.setToolTip("Initialize DMM with RESET and END ALWAYS")
+        self.init_dmm_btn.clicked.connect(self._on_init_dmm)
+        self.init_dmm_btn.setMaximumWidth(50)
+        dmm_layout.addWidget(self.init_dmm_btn)
+
+        dmm_layout.addStretch()
+        input_layout.addLayout(dmm_layout)
 
         # Reading entry
         reading_layout = QHBoxLayout()
@@ -294,24 +1041,56 @@ class ExecutionTab(QWidget):
         # Control buttons
         control_layout = QHBoxLayout()
 
+        # Primary action - Advance to next test point
+        self.advance_btn = QPushButton("▶ Advance")
+        self.advance_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #28a745;
+                color: white;
+                font-weight: bold;
+                padding: 8px 20px;
+            }
+            QPushButton:hover { background-color: #218838; }
+            QPushButton:disabled { background-color: #6c757d; }
+        """)
+        self.advance_btn.clicked.connect(self._on_advance)
+        self.advance_btn.setEnabled(False)
+        control_layout.addWidget(self.advance_btn)
+
+        control_layout.addSpacing(20)
+
         self.pause_btn = QPushButton("Pause")
         self.pause_btn.clicked.connect(self._on_pause)
+        self.pause_btn.setEnabled(False)
         control_layout.addWidget(self.pause_btn)
-
-        self.stop_btn = QPushButton("Stop")
-        self.stop_btn.setStyleSheet("QPushButton { background-color: #ff6b6b; }")
-        self.stop_btn.clicked.connect(self._on_stop)
-        control_layout.addWidget(self.stop_btn)
-
-        control_layout.addStretch()
 
         self.skip_btn = QPushButton("Skip")
         self.skip_btn.clicked.connect(self._on_skip)
+        self.skip_btn.setEnabled(False)
         control_layout.addWidget(self.skip_btn)
 
         self.redo_btn = QPushButton("Redo")
         self.redo_btn.clicked.connect(self._on_redo)
+        self.redo_btn.setEnabled(False)
         control_layout.addWidget(self.redo_btn)
+
+        control_layout.addStretch()
+
+        # Terminate session button
+        self.stop_btn = QPushButton("■ Terminate Session")
+        self.stop_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #dc3545;
+                color: white;
+                font-weight: bold;
+                padding: 8px 15px;
+            }
+            QPushButton:hover { background-color: #c82333; }
+            QPushButton:disabled { background-color: #6c757d; }
+        """)
+        self.stop_btn.clicked.connect(self._on_stop)
+        self.stop_btn.setEnabled(False)
+        control_layout.addWidget(self.stop_btn)
 
         left_layout.addLayout(control_layout)
 
@@ -363,6 +1142,7 @@ class ExecutionTab(QWidget):
             QTableWidget.SelectionBehavior.SelectRows
         )
         self.testpoints_table.itemDoubleClicked.connect(self._on_testpoint_double_clicked)
+        self.testpoints_table.cellClicked.connect(self._on_testpoint_clicked)
         points_layout.addWidget(self.testpoints_table)
 
         right_layout.addWidget(points_group)
@@ -380,17 +1160,49 @@ class ExecutionTab(QWidget):
         workorder = self.workorder_input.text().strip()
         procedure_id = self.procedure_combo.currentData()
 
+        logger.info(f"Starting session: DUT={dut_id}, WO={workorder}, Proc={procedure_id}")
+        self.status_display.clear()
+        self.status_display.append("Starting session...")
+
         if not dut_id:
             QMessageBox.warning(self, "Validation Error", "Please select a DUT.")
+            self.status_display.append("ERROR: No DUT selected")
             return
 
         if not workorder:
             QMessageBox.warning(self, "Validation Error", "Work order is required.")
+            self.status_display.append("ERROR: No work order")
             return
 
         if not procedure_id:
             QMessageBox.warning(self, "Validation Error", "Please select a procedure.")
+            self.status_display.append("ERROR: No procedure selected")
             return
+
+        self.status_display.append(f"DUT ID: {dut_id}")
+        self.status_display.append(f"Procedure ID: {procedure_id}")
+        self.status_display.append("Detecting calibrators...")
+
+        # Select calibrator before starting session
+        self._selected_calibrator = None  # Clear any previous selection
+        self._calibrator_commands = None
+        calibrator = self._select_calibrator()
+
+        if not calibrator:
+            # User cancelled or no calibrator found
+            self.status_display.append("No calibrator detected")
+            reply = QMessageBox.question(
+                self, "Continue Without Calibrator?",
+                "No calibrator was selected.\n\n"
+                "Do you want to continue without automatic calibrator control?\n"
+                "(You'll need to set the calibrator manually)",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                self.status_display.append("Session cancelled - no calibrator")
+                return
+            self.status_display.append("Continuing without calibrator...")
 
         db = get_db()
         if not db.is_connected:
@@ -403,14 +1215,19 @@ class ExecutionTab(QWidget):
                 settings = get_settings()
                 technician = getattr(settings, 'technician_name', None) or 'Unknown'
 
+                # Get asset number from DUT
+                dut = session.query(DUT).filter(DUT.id == dut_id).first()
+                asset_number = dut.asset_number if dut else workorder
+
                 # Create calibration session
                 cal_session = CalibrationSession(
                     dut_id=dut_id,
                     procedure_id=procedure_id,
                     work_order=workorder,
-                    technician=technician,
+                    asset_number=asset_number,
+                    technician_name=technician,
                     started_at=datetime.now(),
-                    status=SessionStatus.in_progress,
+                    status="in_progress",
                 )
                 session.add(cal_session)
                 session.flush()
@@ -420,6 +1237,8 @@ class ExecutionTab(QWidget):
                 self._current_procedure_id = procedure_id
 
                 logger.info(f"Started session {cal_session.id}: DUT={dut_id}, WO={workorder}")
+                if self._selected_calibrator:
+                    logger.info(f"Using calibrator: {self._selected_calibrator['make']} {self._selected_calibrator['model']}")
 
             # Update UI for running state
             self.start_btn.setText("Session Running")
@@ -428,6 +1247,12 @@ class ExecutionTab(QWidget):
             self.workorder_input.setEnabled(False)
             self.procedure_combo.setEnabled(False)
 
+            # Show calibrator info in status
+            if self._selected_calibrator:
+                cal_info = f"{self._selected_calibrator['make']} {self._selected_calibrator['model']}"
+                self.status_display.append(f"Calibrator: {cal_info}")
+                self.status_display.append(f"Address: {self._get_calibrator_address()}")
+
             # Load test points and start execution
             self._load_test_points()
 
@@ -435,9 +1260,133 @@ class ExecutionTab(QWidget):
             logger.error(f"Failed to start session: {e}")
             QMessageBox.critical(self, "Error", f"Failed to start session:\n{e}")
 
-    def _load_test_points(self):
-        """Load test points from procedure into the table."""
-        if not self._current_procedure_id:
+    def _on_continue_session(self):
+        """Continue a previous incomplete session."""
+        # Get selected DUT
+        dut_id = self.dut_combo.currentData()
+        if not dut_id:
+            QMessageBox.warning(self, "No DUT", "Please select a DUT first.")
+            return
+
+        db = get_db()
+        if not db.is_connected:
+            QMessageBox.warning(self, "Database Error", "Database not connected.")
+            return
+
+        try:
+            with db.session() as session:
+                # Find incomplete/aborted sessions for this DUT
+                # Use string values for SQLite compatibility
+                incomplete_sessions = session.query(CalibrationSession).filter(
+                    CalibrationSession.dut_id == dut_id,
+                    CalibrationSession.status.in_([
+                        SessionStatus.IN_PROGRESS.value,
+                        SessionStatus.ABORTED.value,
+                        SessionStatus.PAUSED.value
+                    ])
+                ).order_by(CalibrationSession.started_at.desc()).limit(10).all()
+
+                if not incomplete_sessions:
+                    QMessageBox.information(
+                        self, "No Sessions",
+                        "No incomplete sessions found for this DUT.\n\n"
+                        "Use 'Start Session' to begin a new calibration."
+                    )
+                    return
+
+                # Build list for selection dialog
+                # Count results with a separate query to avoid enum loading issues
+                session_items = []
+                for s in incomplete_sessions:
+                    proc_name = s.procedure.name if s.procedure else "Unknown"
+                    started = s.started_at.strftime("%Y-%m-%d %H:%M") if s.started_at else "Unknown"
+                    # Handle both enum and string (SQLite returns string)
+                    status = s.status.value if hasattr(s.status, 'value') else (s.status or "unknown")
+                    # Count results with separate query
+                    result_count = session.query(TestResult).filter(
+                        TestResult.session_id == s.id
+                    ).count()
+                    session_items.append(
+                        f"Session {s.id}: {proc_name} - Started {started} - {status} ({result_count} readings)"
+                    )
+
+                # Show selection dialog
+                from PyQt6.QtWidgets import QInputDialog
+                selected, ok = QInputDialog.getItem(
+                    self,
+                    "Continue Session",
+                    "Select a session to continue:",
+                    session_items,
+                    0,
+                    False
+                )
+
+                if not ok or not selected:
+                    return
+
+                # Get selected session
+                selected_idx = session_items.index(selected)
+                selected_session = incomplete_sessions[selected_idx]
+
+                # Store session info
+                self._current_session_id = selected_session.id
+                self._current_dut_id = selected_session.dut_id
+                self._current_procedure_id = selected_session.procedure_id
+
+                # Update workorder if set
+                if selected_session.work_order:
+                    self.workorder_input.setText(selected_session.work_order)
+
+                # Set procedure combo to match
+                for i in range(self.procedure_combo.count()):
+                    if self.procedure_combo.itemData(i) == selected_session.procedure_id:
+                        self.procedure_combo.setCurrentIndex(i)
+                        break
+
+                # Update session status to in_progress (use string for SQLite)
+                selected_session.status = SessionStatus.IN_PROGRESS.value
+                session.commit()
+
+                logger.info(f"Continuing session {self._current_session_id}")
+
+        except Exception as e:
+            logger.error(f"Failed to find sessions: {e}")
+            QMessageBox.critical(self, "Error", f"Failed to find sessions:\n{e}")
+            return
+
+        # Select calibrator
+        if not self._select_calibrator():
+            self.status_display.append("Session resumed without calibrator")
+
+        # Enable control buttons
+        self.advance_btn.setEnabled(True)
+        self.pause_btn.setEnabled(True)
+        self.skip_btn.setEnabled(True)
+        self.redo_btn.setEnabled(True)
+        self.stop_btn.setEnabled(True)
+
+        # Disable start controls
+        self.start_btn.setText("Session Running")
+        self.start_btn.setEnabled(False)
+        self.continue_btn.setEnabled(False)
+        self.dut_combo.setEnabled(False)
+        self.workorder_input.setEnabled(False)
+        self.procedure_combo.setEnabled(False)
+
+        self.status_display.append("=" * 40)
+        self.status_display.append(f"CONTINUING SESSION {self._current_session_id}")
+
+        # Show calibrator info
+        if self._selected_calibrator:
+            cal_info = f"{self._selected_calibrator['make']} {self._selected_calibrator['model']}"
+            self.status_display.append(f"Calibrator: {cal_info}")
+
+        # Load test points WITH existing results
+        self._load_test_points_with_results()
+
+    def _load_test_points_with_results(self):
+        """Load test points and restore previous session results."""
+        if not self._current_procedure_id or not self._current_session_id:
             return
 
         db = get_db()
@@ -457,6 +1406,21 @@ class ExecutionTab(QWidget):
                     QMessageBox.warning(self, "Error", "Procedure not found.")
                     return
 
+                # Get existing results for this session using raw query to avoid enum issues
+                existing_results = {}
+                from sqlalchemy import text
+                raw_results = session.execute(text(
+                    "SELECT test_point_id, measured_value, status FROM test_results "
+                    "WHERE session_id = :sid ORDER BY id"
+                ), {"sid": self._current_session_id}).fetchall()
+                for r in raw_results:
+                    # Keep only the latest result for each test point
+                    # r is (test_point_id, measured_value, status)
+                    existing_results[r[0]] = {
+                        "measured_value": r[1],
+                        "status": r[2]  # This is the raw string value
+                    }
+
                 # Load all sections and test points
                 for section in procedure.sections:
                     for tp in section.test_points:
@@ -464,24 +1428,193 @@ class ExecutionTab(QWidget):
                             "id": tp.id,
                             "section_id": section.id,
                             "section_name": section.name,
+                            "standard_section_type": section.standard_section_type,
                             "description": tp.description or f"{tp.nominal_value} {tp.unit}",
                             "nominal_value": tp.nominal_value,
                             "unit": tp.unit,
                             "frequency": tp.frequency,
+                            "frequency_unit": tp.frequency_unit or "Hz",
                             "tolerance_value": tp.tolerance_value,
                             "tolerance_type": tp.tolerance_type.value if tp.tolerance_type else "percent",
                             "source_command": tp.source_command,
                             "operate_command": tp.operate_command,
                             "measure_command": tp.measure_command,
+                            "test_type": tp.test_type.value if tp.test_type else "measurement",
+                            "pass_fail_prompt": tp.pass_fail_prompt,
+                            "operator_prompt": tp.operator_prompt,
+                            "pre_nominal_value": tp.pre_nominal_value,
+                            "pre_unit": tp.pre_unit,
+                            "pre_frequency": tp.pre_frequency,
+                            "pre_frequency_unit": tp.pre_frequency_unit or "Hz",
+                            "pre_delay_seconds": tp.pre_delay_seconds or 0,
+                            "pre_conditioning_steps": tp.pre_conditioning_steps or [],
+                            "measurement_target": tp.measurement_target.value if tp.measurement_target else "PRIMARY",
+                            "expected_value": tp.expected_value,
+                            "expected_unit": tp.expected_unit,
+                            "wiring_diagram_type": tp.wiring_diagram_type,
+                        })
+
+            # Populate table with results
+            self.testpoints_table.setRowCount(len(self._test_points))
+            self.progress_bar.setMaximum(len(self._test_points))
+
+            completed_count = 0
+            first_pending_row = None
+
+            for i, tp in enumerate(self._test_points):
+                # Number
+                self.testpoints_table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
+
+                # Section / Test
+                section_test = f"{tp['section_name']} / {tp['description']}"
+                self.testpoints_table.setItem(i, 1, QTableWidgetItem(section_test))
+
+                # Nominal
+                nominal_str = f"{tp['nominal_value']} {tp['unit']}"
+                if tp.get('frequency'):
+                    nominal_str += f" @ {tp['frequency']} {tp.get('frequency_unit', 'Hz')}"
+                self.testpoints_table.setItem(i, 2, QTableWidgetItem(nominal_str))
+
+                # Check for existing result
+                result = existing_results.get(tp['id'])
+                if result:
+                    # Measured value
+                    if result['measured_value'] is not None:
+                        measured_str = f"{result['measured_value']}"
+                        self.testpoints_table.setItem(i, 3, QTableWidgetItem(measured_str))
+                    else:
+                        self.testpoints_table.setItem(i, 3, QTableWidgetItem(""))
+
+                    # Status with color - handle both enum and string values
+                    status_raw = result['status']
+                    if status_raw:
+                        # Handle both "pass"/"fail" strings and "PASS"/"FAIL" enum values
+                        status_text = str(status_raw).lower()
+                    else:
+                        status_text = "pending"
+                    status_item = QTableWidgetItem(status_text.capitalize())
+                    if status_text == "pass":
+                        status_item.setBackground(QColor(200, 255, 200))
+                        completed_count += 1
+                    elif status_text == "fail":
+                        status_item.setBackground(QColor(255, 200, 200))
+                        completed_count += 1
+                    self.testpoints_table.setItem(i, 4, status_item)
+                else:
+                    # No result - pending
+                    self.testpoints_table.setItem(i, 3, QTableWidgetItem(""))
+                    self.testpoints_table.setItem(i, 4, QTableWidgetItem("Pending"))
+                    if first_pending_row is None:
+                        first_pending_row = i
+
+            # Update progress
+            self.progress_bar.setValue(completed_count)
+
+            # Select first pending test point, or first if all complete
+            start_row = first_pending_row if first_pending_row is not None else 0
+            self._current_test_index = start_row
+            self.testpoints_table.selectRow(start_row)
+
+            self.status_display.append(f"Loaded {len(self._test_points)} test points")
+            self.status_display.append(f"Previous results: {completed_count} completed")
+            if first_pending_row is not None:
+                self.status_display.append(f"Resuming from test point {first_pending_row + 1}")
+            else:
+                self.status_display.append("All test points completed - review or redo as needed")
+
+            self.status_display.append("SESSION RESUMED - Ready to continue")
+
+        except Exception as e:
+            logger.error(f"Failed to load test points with results: {e}")
+            self.status_display.append(f"ERROR: {e}")
+
+    def _load_test_points(self):
+        """Load test points from procedure into the table."""
+        if not self._current_procedure_id:
+            self.status_display.append("ERROR: No procedure ID set")
+            return
+
+        db = get_db()
+        if not db.is_connected:
+            self.status_display.append("ERROR: Database not connected")
+            return
+
+        self.status_display.append("Loading test points...")
+
+        self._test_points = []
+        self.testpoints_table.setRowCount(0)
+
+        try:
+            with db.session() as session:
+                procedure = session.query(Procedure).filter(
+                    Procedure.id == self._current_procedure_id
+                ).first()
+
+                if not procedure:
+                    QMessageBox.warning(self, "Error", "Procedure not found.")
+                    return
+
+                # Clean up any corrupted section names (with accumulated [type] suffixes)
+                sections_cleaned = False
+                for section in procedure.sections:
+                    original_name = section.name
+                    clean_name = original_name
+                    # Remove all trailing [...] suffixes that may have accumulated
+                    while re.search(r'\s*\[[^\]]+\]\s*$', clean_name):
+                        clean_name = re.sub(r'\s*\[[^\]]+\]\s*$', '', clean_name).strip()
+                    if clean_name != original_name:
+                        section.name = clean_name
+                        sections_cleaned = True
+                        logger.info(f"Cleaned corrupted section name: '{original_name}' -> '{clean_name}'")
+
+                if sections_cleaned:
+                    session.commit()
+
+                # Load all sections and test points
+                for section in procedure.sections:
+                    for tp in section.test_points:
+                        self._test_points.append({
+                            "id": tp.id,
+                            "section_id": section.id,
+                            "section_name": section.name,
+                            "standard_section_type": section.standard_section_type,
+                            "description": tp.description or f"{tp.nominal_value} {tp.unit}",
+                            "nominal_value": tp.nominal_value,
+                            "unit": tp.unit,
+                            "frequency": tp.frequency,
+                            "frequency_unit": tp.frequency_unit or "Hz",
+                            "tolerance_value": tp.tolerance_value,
+                            "tolerance_type": tp.tolerance_type.value if tp.tolerance_type else "percent",
+                            "source_command": tp.source_command,
+                            "operate_command": tp.operate_command,
+                            "measure_command": tp.measure_command,
+                            "test_type": tp.test_type.value if tp.test_type else "measurement",
+                            "pass_fail_prompt": tp.pass_fail_prompt,
+                            "operator_prompt": tp.operator_prompt,
+                            # Pre-conditioning
+                            "pre_nominal_value": tp.pre_nominal_value,
+                            "pre_unit": tp.pre_unit,
+                            "pre_frequency": tp.pre_frequency,
+                            "pre_frequency_unit": tp.pre_frequency_unit or "Hz",
+                            "pre_delay_seconds": tp.pre_delay_seconds or 0,
+                            "pre_conditioning_steps": tp.pre_conditioning_steps or [],
+                            # Measurement target - what value to compare reading against
+                            "measurement_target": tp.measurement_target.value if tp.measurement_target else "PRIMARY",
+                            "expected_value": tp.expected_value,
+                            "expected_unit": tp.expected_unit,
+                            # Test point specific wiring diagram
+                            "wiring_diagram_type": tp.wiring_diagram_type,
                         })
 
         except Exception as e:
             logger.error(f"Failed to load test points: {e}")
+            self.status_display.append(f"ERROR loading test points: {e}")
             QMessageBox.critical(self, "Error", f"Failed to load test points:\n{e}")
             return
 
         if not self._test_points:
-            QMessageBox.warning(self, "No Test Points", "This procedure has no test points.")
+            self.status_display.append("ERROR: Procedure has no test points!")
+            QMessageBox.warning(self, "No Test Points", "This procedure has no test points.\n\nAdd test points in the Procedures tab first.")
             return
 
         # Populate table
@@ -503,7 +1636,7 @@ class ExecutionTab(QWidget):
             # Nominal
             nominal_str = f"{tp['nominal_value']} {tp['unit']}"
             if tp.get('frequency'):
-                nominal_str += f" @ {tp['frequency']} Hz"
+                nominal_str += f" @ {tp['frequency']} {tp.get('frequency_unit', 'Hz')}"
             self.testpoints_table.setItem(i, 2, QTableWidgetItem(nominal_str))
 
             # Measured (empty)
@@ -517,8 +1650,32 @@ class ExecutionTab(QWidget):
         self.testpoints_table.selectRow(0)
         self._update_current_display(0)
 
-        self.status_display.clear()
-        self.status_display.append(f"Session started with {len(self._test_points)} test points")
+        self.status_display.append(f"Loaded {len(self._test_points)} test points")
+        self.status_display.append("=" * 40)
+        self.status_display.append("SESSION STARTED - Ready for first test point")
+        self.status_display.append("Enter reading and press Submit, or click 'Get Remote'")
+
+        # Enable control buttons
+        self.advance_btn.setEnabled(True)
+        self.pause_btn.setEnabled(True)
+        self.skip_btn.setEnabled(True)
+        self.redo_btn.setEnabled(True)
+        self.stop_btn.setEnabled(True)
+
+        # Flash the nominal display to draw attention
+        self.nominal_display.setStyleSheet(
+            "QLabel { background-color: #2d2d2d; color: #00ff00; "
+            "padding: 20px; border-radius: 10px; border: 3px solid #00ff00; }"
+        )
+
+        # Focus reading input if keyboard entry is selected
+        self._focus_reading_input()
+
+    def _focus_reading_input(self):
+        """Focus the reading input box if keyboard entry is selected."""
+        if self.input_method_combo.currentText() == "Keyboard Entry":
+            self.reading_input.setFocus()
+            self.reading_input.selectAll()
 
     def _load_sample_testpoints(self):
         """Load sample test points for demonstration (deprecated)."""
@@ -548,18 +1705,44 @@ class ExecutionTab(QWidget):
         self._update_current_display(0)
 
     def _update_current_display(self, row: int):
-        """Update the current test point display."""
+        """Update the current test point display and send calibrator output."""
         self._current_test_index = row
 
         # Get test point data if available
         if row < len(self._test_points):
             tp = self._test_points[row]
+            section_id = tp.get('section_id')
+
+            # Check if we're entering a new section
+            section_changed = (section_id != self._current_section_id)
+
             self.section_label.setText(tp['section_name'])
             self.testpoint_label.setText(tp['description'])
 
-            # Format nominal display
-            nominal_str = f"{tp['nominal_value']} {tp['unit']}"
+            # Format nominal display - show what we're expecting based on measurement_target
+            measurement_target = tp.get('measurement_target', 'PRIMARY')
+            if measurement_target == 'FREQUENCY':
+                # We're measuring frequency
+                expected_str = f"{tp.get('frequency', 0)} {tp.get('frequency_unit', 'Hz')}"
+                cal_out_str = f"(CAL: {tp['nominal_value']} {tp['unit']})"
+                nominal_str = f"{expected_str}\n{cal_out_str}"
+            elif measurement_target == 'CUSTOM':
+                # Custom expected value
+                expected_str = f"{tp.get('expected_value', 0)} {tp.get('expected_unit', '')}"
+                cal_out_str = f"(CAL: {tp['nominal_value']} {tp['unit']}"
+                if tp.get('frequency'):
+                    cal_out_str += f" @ {tp['frequency']} {tp.get('frequency_unit', 'Hz')}"
+                cal_out_str += ")"
+                nominal_str = f"{expected_str}\n{cal_out_str}"
+            else:  # 'primary' - default
+                # We're measuring the nominal value
+                nominal_str = f"{tp['nominal_value']} {tp['unit']}"
+                if tp.get('frequency'):
+                    nominal_str += f" @ {tp['frequency']} {tp.get('frequency_unit', 'Hz')}"
             self.nominal_display.setText(nominal_str)
+
+            # Check for high voltage warning (>= 100V)
+            self._check_high_voltage(tp['nominal_value'], tp['unit'])
 
             # Format tolerance
             tol_symbol = {
@@ -569,7 +1752,43 @@ class ExecutionTab(QWidget):
             }.get(tp['tolerance_type'], "%")
             self.tolerance_label.setText(f"± {tp['tolerance_value']}{tol_symbol}")
 
-            self.status_display.append(f"Setting output: {nominal_str}")
+            # Load wiring diagram for this section
+            self._load_wiring_diagram(
+                section_id,
+                tp.get('section_name'),
+                tp.get('standard_section_type')
+            )
+
+            # If section changed, show wiring confirmation before outputting
+            if section_changed:
+                self._current_section_id = section_id
+                self.status_display.append("=" * 40)
+                self.status_display.append(f"NEW SECTION: {tp['section_name']}")
+                self.status_display.append("Check wiring diagram and confirm connections")
+
+                # Show wiring confirmation dialog
+                if not self._confirm_wiring(tp):
+                    # User cancelled - don't output
+                    self.status_display.append("Waiting for wiring confirmation...")
+                    return
+
+            # Check for test point-specific instructions (prompt and/or wiring)
+            tp_wiring_type = tp.get('wiring_diagram_type')
+            operator_prompt = tp.get('operator_prompt')
+
+            if operator_prompt or tp_wiring_type:
+                # Load test point-specific wiring diagram if specified
+                if tp_wiring_type:
+                    self._load_testpoint_wiring_diagram(tp_wiring_type)
+                    self.status_display.append(f"Test point wiring: {tp_wiring_type}")
+
+                # Show instructions/wiring confirmation dialog
+                if not self._confirm_testpoint_instructions(tp, operator_prompt, tp_wiring_type):
+                    self.status_display.append("Waiting for operator confirmation...")
+                    return
+
+            # Send calibrator output command
+            self._set_calibrator_output(tp)
         else:
             # Fallback to table data
             section = self.testpoints_table.item(row, 1).text() if self.testpoints_table.item(row, 1) else "--"
@@ -580,7 +1799,363 @@ class ExecutionTab(QWidget):
             self.nominal_display.setText(nominal)
             self.tolerance_label.setText("± 0.1%")
 
-            self.status_display.append(f"Setting output: {nominal}")
+            self.status_display.append(f"Manual mode: {nominal}")
+            self.wiring_label.setText("No wiring diagram available")
+
+            # Hide high voltage warning in manual mode
+            self._hide_hv_warning()
+
+    def _confirm_wiring(self, tp: Dict[str, Any]) -> bool:
+        """Show wiring confirmation dialog for new section."""
+        section_name = tp.get('section_name', 'Unknown')
+        standard_type = tp.get('standard_section_type', '')
+
+        msg = f"Entering new test section:\n\n"
+        msg += f"   Section: {section_name}\n"
+        if standard_type:
+            msg += f"   Type: {standard_type}\n"
+        msg += f"\nPlease verify the wiring connections match the diagram.\n\n"
+        msg += "Click 'OK' when ready to begin testing this section.\n"
+        msg += "Click 'Cancel' to pause and check wiring."
+
+        reply = QMessageBox.question(
+            self,
+            "Confirm Wiring",
+            msg,
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Ok
+        )
+
+        if reply == QMessageBox.StandardButton.Ok:
+            self.status_display.append("Wiring confirmed - proceeding with test")
+            # Focus reading input for keyboard entry
+            self._focus_reading_input()
+            return True
+        else:
+            return False
+
+    def _load_testpoint_wiring_diagram(self, wiring_type: str):
+        """Load test point-specific wiring diagram from library."""
+        if not wiring_type:
+            return
+
+        db = get_db()
+        if not db.is_connected:
+            return
+
+        try:
+            # Get calibrator model from workstation
+            cal_model = ""
+            if self._selected_calibrator:
+                cal_model = self._selected_calibrator.get('model', '')
+
+            with db.session() as session:
+                # Try to find matching diagram in library
+                diagram = session.query(WiringDiagramLibrary).filter(
+                    WiringDiagramLibrary.section_name == wiring_type
+                ).first()
+
+                # If calibrator specific exists, prefer that
+                if cal_model:
+                    specific = session.query(WiringDiagramLibrary).filter(
+                        WiringDiagramLibrary.section_name == wiring_type,
+                        WiringDiagramLibrary.calibrator_model.ilike(f"%{cal_model}%")
+                    ).first()
+                    if specific:
+                        diagram = specific
+
+                if diagram and diagram.image_data:
+                    self._display_diagram_image(diagram.image_data)
+                    self.status_display.append(f"Loaded wiring diagram: {wiring_type}")
+                else:
+                    self.wiring_label.setText(f"No diagram found for: {wiring_type}")
+
+        except Exception as e:
+            logger.error(f"Failed to load test point wiring diagram: {e}")
+
+    def _confirm_testpoint_wiring(self, tp: Dict[str, Any], wiring_type: str) -> bool:
+        """Show wiring confirmation dialog for test point-specific wiring.
+        Legacy method - use _confirm_testpoint_instructions for new code.
+        """
+        return self._confirm_testpoint_instructions(tp, None, wiring_type)
+
+    def _confirm_testpoint_instructions(
+        self,
+        tp: Dict[str, Any],
+        operator_prompt: Optional[str],
+        wiring_type: Optional[str]
+    ) -> bool:
+        """Show operator instructions dialog before executing test point.
+
+        Handles three cases:
+        1. Prompt only - show text message
+        2. Wiring only - show wiring diagram info
+        3. Both - show prompt text + wiring diagram info
+        """
+        section_name = tp.get('section_name', 'Unknown')
+        description = tp.get('description', '')
+
+        # Build dialog message
+        if operator_prompt and wiring_type:
+            # Both prompt and wiring
+            title = "Operator Instructions"
+            msg = f"Test Point: {description}\n"
+            msg += f"Section: {section_name}\n\n"
+            msg += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            msg += f"{operator_prompt}\n"
+            msg += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            msg += f"Wiring Diagram: {wiring_type}\n"
+            msg += "Please verify connections match the diagram.\n\n"
+            msg += "Click 'OK' when ready to proceed."
+        elif operator_prompt:
+            # Prompt only
+            title = "Operator Instructions"
+            msg = f"Test Point: {description}\n"
+            msg += f"Section: {section_name}\n\n"
+            msg += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            msg += f"{operator_prompt}\n"
+            msg += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            msg += "Click 'OK' when ready to proceed."
+        else:
+            # Wiring only
+            title = "Confirm Test Point Wiring"
+            msg = f"Test point requires specific wiring:\n\n"
+            msg += f"   Section: {section_name}\n"
+            msg += f"   Test Point: {description}\n"
+            msg += f"   Wiring Type: {wiring_type}\n\n"
+            msg += "Please verify the wiring connections match the diagram.\n\n"
+            msg += "Click 'OK' when ready to proceed."
+
+        reply = QMessageBox.question(
+            self,
+            title,
+            msg,
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Ok
+        )
+
+        if reply == QMessageBox.StandardButton.Ok:
+            if operator_prompt:
+                self.status_display.append("Operator instructions acknowledged")
+            if wiring_type:
+                self.status_display.append("Test point wiring confirmed")
+            self._focus_reading_input()
+            return True
+        else:
+            return False
+
+    def _set_calibrator_output(self, tp: Dict[str, Any]):
+        """Send output command to calibrator for the test point."""
+        test_type = tp.get('test_type', 'measurement')
+
+        # For Pass/Fail tests, check if we need to do pre-conditioning first
+        if test_type == 'pass_fail':
+            # Execute pre-conditioning if defined and we have a calibrator
+            if self._selected_calibrator and self._has_preconditioning(tp):
+                self._execute_passfail_preconditioning(tp)
+            # Then show the Pass/Fail dialog
+            self._execute_pass_fail_test(tp)
+            return
+
+        # Don't output for DMM-only tests
+        if test_type == 'dmm_measurement':
+            self.status_display.append("DMM Measurement - no calibrator output needed")
+            return
+
+        # Check if we have a calibrator
+        if not self._selected_calibrator:
+            nominal_str = f"{tp['nominal_value']} {tp['unit']}"
+            self.status_display.append(f"No calibrator - set manually: {nominal_str}")
+            return
+
+        # Debug: Show calibrator command bank status
+        if self._calibrator_commands:
+            logger.info(f"Command bank loaded with {len(self._calibrator_commands)} commands")
+        else:
+            logger.warning("No command bank loaded!")
+            self.status_display.append("WARNING: No command bank for this calibrator")
+
+        # Get source command - from test point or command bank
+        # Priority: test point specific > OUTPUT_AC (if freq) > OUTPUT > legacy names
+        source_cmd = tp.get('source_command')
+        logger.info(f"Test point source_command: {source_cmd}")
+
+        if not source_cmd and self._calibrator_commands:
+            # Check if this is an AC test (has frequency)
+            has_frequency = tp.get('frequency') and float(tp.get('frequency', 0)) > 0
+
+            if has_frequency:
+                # Try OUTPUT_AC first for AC tests
+                source_cmd = self._get_calibrator_command("OUTPUT_AC")
+                if source_cmd:
+                    logger.info(f"Using OUTPUT_AC command: {source_cmd}")
+
+            if not source_cmd:
+                # Try standard OUTPUT command
+                for cmd_name in ["OUTPUT", "OUT", "SOURCE"]:
+                    bank_cmd = self._get_calibrator_command(cmd_name)
+                    if bank_cmd:
+                        source_cmd = bank_cmd
+                        logger.info(f"Using {cmd_name} command: {source_cmd}")
+                        break
+
+        if not source_cmd:
+            nominal_str = f"{tp['nominal_value']} {tp['unit']}"
+            self.status_display.append(f"No OUTPUT command - set manually: {nominal_str}")
+            self.status_display.append("(Add 'OUTPUT' command to command bank)")
+            return
+
+        # Get operate command - use standard name OPERATE
+        operate_cmd = tp.get('operate_command')
+        if not operate_cmd:
+            operate_cmd = self._get_calibrator_command("OPERATE") or self._get_calibrator_command("OPER")
+
+        # Check for pre-conditioning
+        if self._has_preconditioning(tp):
+            pre_cmd = self._substitute_pre_placeholders(source_cmd, tp)
+            delay = tp.get('pre_delay_seconds', 0) or 0
+
+            self.status_display.append(f"Pre-conditioning: {pre_cmd}")
+            if not self._send_calibrator_commands(pre_cmd, operate_cmd):
+                self.status_display.append("WARNING: Pre-conditioning command failed")
+            elif delay > 0:
+                self.status_display.append(f"Waiting {delay} seconds...")
+                # Process events to keep UI responsive during wait
+                from PyQt6.QtWidgets import QApplication
+                end_time = time.time() + delay
+                while time.time() < end_time:
+                    QApplication.processEvents()
+                    time.sleep(0.1)
+
+        # Send the actual test point output command
+        final_cmd = self._substitute_placeholders(source_cmd, tp)
+        self.status_display.append(f"Calibrator: {final_cmd}")
+
+        if self._send_calibrator_commands(final_cmd, operate_cmd):
+            self.status_display.append("Output set - ready for reading")
+        else:
+            self.status_display.append("WARNING: Calibrator command failed!")
+
+    def _load_wiring_diagram(
+        self,
+        section_id: Optional[int],
+        section_name: Optional[str],
+        standard_section_type: Optional[str] = None
+    ):
+        """Load and display wiring diagram for the current section.
+
+        Priority:
+        1. Auto-lookup: calibrator_model + standard_section_type in library (BEST - no manual linking needed)
+        2. Direct link via SectionDiagramLink (manual linking)
+        3. Legacy WiringDiagram entry (direct section link)
+        4. Fuzzy match from WiringDiagramLibrary (fallback)
+        """
+        self.wiring_label.clear()
+        self.wiring_label.setText("No wiring diagram available")
+
+        if not section_id:
+            return
+
+        db = get_db()
+        if not db.is_connected:
+            return
+
+        try:
+            with db.session() as session:
+                cal_model = ""
+                if self._selected_calibrator:
+                    cal_model = self._selected_calibrator.get('model', '')
+
+                # 1. AUTO-LOOKUP: calibrator_model + standard_section_type (best approach)
+                # This requires no manual linking - just match by calibrator and standard type
+                if cal_model and standard_section_type:
+                    # Get DUT model for more specific matching if available
+                    dut_model = ""
+                    if self._current_dut_id:
+                        from calsystem.database.models import DUT
+                        dut = session.query(DUT).filter(DUT.id == self._current_dut_id).first()
+                        if dut:
+                            dut_model = dut.model or ""
+
+                    # Try exact match: calibrator + section_type + dut_model
+                    if dut_model:
+                        lib_diagram = session.query(WiringDiagramLibrary).filter(
+                            WiringDiagramLibrary.calibrator_model.ilike(cal_model),
+                            WiringDiagramLibrary.section_name == standard_section_type,
+                            WiringDiagramLibrary.dut_model.ilike(f"%{dut_model}%")
+                        ).first()
+
+                        if lib_diagram and lib_diagram.image_data:
+                            logger.debug(f"Auto-lookup found: {lib_diagram.filename} (exact match)")
+                            self._display_diagram_image(lib_diagram.image_data)
+                            return
+
+                    # Try calibrator + section_type only (any DUT)
+                    lib_diagram = session.query(WiringDiagramLibrary).filter(
+                        WiringDiagramLibrary.calibrator_model.ilike(cal_model),
+                        WiringDiagramLibrary.section_name == standard_section_type
+                    ).first()
+
+                    if lib_diagram and lib_diagram.image_data:
+                        logger.debug(f"Auto-lookup found: {lib_diagram.filename}")
+                        self._display_diagram_image(lib_diagram.image_data)
+                        return
+
+                # 2. Check for direct link via SectionDiagramLink (manual linking)
+                if cal_model:
+                    link = session.query(SectionDiagramLink).filter(
+                        SectionDiagramLink.section_id == section_id,
+                        SectionDiagramLink.calibrator_model.ilike(f"%{cal_model}%")
+                    ).first()
+
+                    if link and link.diagram:
+                        if link.diagram.image_data:
+                            logger.debug(f"Using linked diagram: {link.diagram.filename}")
+                            self._display_diagram_image(link.diagram.image_data)
+                            return
+
+                # 3. Check for legacy WiringDiagram entry
+                diagram = session.query(WiringDiagram).filter(
+                    WiringDiagram.section_id == section_id
+                ).first()
+
+                if diagram and diagram.image_data:
+                    logger.debug(f"Using legacy diagram: {diagram.name}")
+                    self._display_diagram_image(diagram.image_data)
+                    return
+
+                # 4. Fuzzy match from library (fallback)
+                if cal_model and section_name:
+                    lib_diagram = session.query(WiringDiagramLibrary).filter(
+                        WiringDiagramLibrary.calibrator_model.ilike(f"%{cal_model}%"),
+                        WiringDiagramLibrary.section_name.ilike(f"%{section_name}%")
+                    ).first()
+
+                    if lib_diagram and lib_diagram.image_data:
+                        logger.debug(f"Using fuzzy match diagram: {lib_diagram.filename}")
+                        self._display_diagram_image(lib_diagram.image_data)
+                        return
+
+        except Exception as e:
+            logger.error(f"Failed to load wiring diagram: {e}")
+
+    def _display_diagram_image(self, image_data: bytes):
+        """Display wiring diagram image."""
+        from PyQt6.QtGui import QImage, QPixmap
+
+        image = QImage()
+        image.loadFromData(image_data)
+
+        if not image.isNull():
+            pixmap = QPixmap.fromImage(image)
+            scaled = pixmap.scaled(
+                self.wiring_label.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            )
+            self.wiring_label.setPixmap(scaled)
+        else:
+            self.wiring_label.setText("Failed to load diagram image")
 
     def _on_input_method_changed(self, method: str):
         """Handle input method change."""
@@ -610,29 +2185,128 @@ class ExecutionTab(QWidget):
             return
 
         tp = self._test_points[row]
+        test_type = tp.get('test_type', 'measurement')
 
-        # First send source command to calibrator if available
-        if tp.get('source_command'):
-            self.status_display.append(f"Setting source: {tp['source_command']}")
-            # TODO: Send via VISAManager when calibrator address is known
+        # Determine if we need calibrator output based on test type
+        # dmm_measurement: DMM only (no calibrator)
+        # calibrator_dmm: Calibrator + DMM
+        # measurement: Manual entry or DUT query (calibrator optional)
+        use_calibrator = test_type not in ['dmm_measurement']
+        use_dmm = test_type in ['dmm_measurement', 'calibrator_dmm'] or self._selected_dmm
 
-        if tp.get('operate_command'):
-            self.status_display.append(f"Sending operate: {tp['operate_command']}")
-            # TODO: Send via VISAManager
+        # Get source command - from test point or command bank
+        source_cmd = tp.get('source_command')
+        if not source_cmd and self._calibrator_commands:
+            # Try to get default source command from bank and substitute
+            for cmd_name in ["OUT", "SOURCE", "OUTPUT"]:
+                bank_cmd = self._get_calibrator_command(cmd_name)
+                if bank_cmd:
+                    source_cmd = bank_cmd
+                    break
 
-        # Query DUT for measurement
+        # Get operate command - use standard name OPERATE
+        operate_cmd = tp.get('operate_command')
+        if not operate_cmd:
+            operate_cmd = self._get_calibrator_command("OPERATE") or self._get_calibrator_command("OPER")
+
+        # Send calibrator commands if needed and we have a calibrator
+        if use_calibrator and self._selected_calibrator and source_cmd:
+            # Check for pre-conditioning
+            if self._has_preconditioning(tp):
+                pre_cmd = self._substitute_pre_placeholders(source_cmd, tp)
+                delay = tp.get('pre_delay_seconds', 0) or 0
+
+                self.status_display.append(f"Pre-conditioning: {pre_cmd}")
+                if not self._send_calibrator_commands(pre_cmd, operate_cmd):
+                    QMessageBox.warning(
+                        self, "Calibrator Error",
+                        "Failed to send pre-conditioning command.\n"
+                        "Check connection and try again."
+                    )
+                    return
+
+                if delay > 0:
+                    self.status_display.append(f"Waiting {delay} seconds...")
+                    # Process events to keep UI responsive during wait
+                    from PyQt6.QtWidgets import QApplication
+                    end_time = time.time() + delay
+                    while time.time() < end_time:
+                        QApplication.processEvents()
+                        time.sleep(0.1)
+
+            # Now send the actual test command
+            source_cmd = self._substitute_placeholders(source_cmd, tp)
+
+            self.status_display.append(f"Setting calibrator: {source_cmd}")
+
+            if not self._send_calibrator_commands(source_cmd, operate_cmd):
+                QMessageBox.warning(
+                    self, "Calibrator Error",
+                    "Failed to send commands to calibrator.\n"
+                    "Check connection and try again."
+                )
+                return
+        elif use_calibrator and not self._selected_calibrator:
+            self.status_display.append("No calibrator selected - set source manually")
+        elif not use_calibrator:
+            self.status_display.append("DMM Measurement mode - no calibrator output needed")
+
+        # Check if we need to use the Reference DMM
+        if test_type in ['dmm_measurement', 'calibrator_dmm'] and not self._selected_dmm:
+            QMessageBox.warning(
+                self, "No DMM Selected",
+                f"This test point requires a Reference DMM ({test_type}).\n\n"
+                "Please select a DMM from the 'Reference DMM' dropdown and click 'Init'."
+            )
+            return
+
+        # Use DMM if selected or required by test type
+        if self._selected_dmm:
+            # Determine measurement function from unit
+            unit = tp.get('unit', '').lower()
+            frequency = tp.get('frequency', 0) or 0
+
+            # Map unit to DMM function
+            if 'ohm' in unit:
+                dmm_function = "OHM"
+            elif frequency > 0 or 'ac' in unit:
+                dmm_function = "ACV"
+            else:
+                dmm_function = "DCV"  # Default to DC Voltage
+
+            self.status_display.append(f"Querying {self._selected_dmm['make']} {self._selected_dmm['model']}: {dmm_function} AUTO")
+
+            # Query the Reference DMM
+            reading_base = self._query_dmm(dmm_function)
+
+            if reading_base is not None:
+                # Convert from base units to test point's unit
+                target_unit = tp.get('unit', 'V')
+                reading = self._convert_to_test_unit(reading_base, target_unit)
+
+                self.status_display.append(f"Received: {reading_base} (base units)")
+                self.status_display.append(f"Converted: {reading} {target_unit}")
+                self.reading_input.setText(str(reading))
+                # Auto-submit the reading
+                self._on_submit_reading()
+                return
+            else:
+                self.status_display.append("Failed to get reading from DMM")
+                self.status_display.append("Enter reading manually or check DMM connection")
+                return
+
+        # Fallback: Query DUT directly (if no Reference DMM selected)
         measure_cmd = tp.get('measure_command')
         if not measure_cmd:
-            QMessageBox.warning(self, "No Command", "No measure command configured for this test point.")
+            self.status_display.append("No Reference DMM selected and no measure command configured")
+            self.status_display.append("Select a Reference DMM or enter reading manually")
             return
 
         self.status_display.append(f"Querying DUT: {measure_cmd}")
 
-        # Try to get reading via VISA
+        # Try to get reading via VISA from DUT
         try:
-            from calsystem.instruments.visa_manager import VISAManager
-
-            visa_mgr = VISAManager()
+            visa_mgr = get_visa_manager()
 
             # Get DUT address from database
             db = get_db()
@@ -641,31 +2315,200 @@ class ExecutionTab(QWidget):
                     dut = session.query(DUT).filter(DUT.id == self._current_dut_id).first()
                     if dut and hasattr(dut, 'visa_address') and dut.visa_address:
                         # Query the device
-                        response = visa_mgr.query(dut.visa_address, measure_cmd)
-                        if response:
+                        success, response = visa_mgr.query(dut.visa_address, measure_cmd)
+                        if success and response:
                             # Parse numeric value from response
                             try:
-                                value = float(response.strip())
+                                value = float(response.strip().split()[0])
                                 self.reading_input.setText(str(value))
                                 self.status_display.append(f"Received: {value}")
                                 # Auto-submit if successful
                                 self._on_submit_reading()
                                 return
-                            except ValueError:
+                            except (ValueError, IndexError):
                                 self.status_display.append(f"Could not parse: {response}")
                         else:
-                            self.status_display.append("No response from device")
+                            self.status_display.append(f"No response from device: {response}")
                     else:
                         self.status_display.append("DUT has no VISA address configured")
 
-            # Fallback: simulate a reading for demo
-            self.status_display.append("(Demo mode - enter reading manually)")
+            # Fallback: manual entry
+            self.status_display.append("Enter reading manually")
 
-        except ImportError:
-            self.status_display.append("PyVISA not available - enter reading manually")
         except Exception as e:
             logger.error(f"Remote reading failed: {e}")
             self.status_display.append(f"Error: {e}")
+
+    def _execute_passfail_preconditioning(self, tp: Dict[str, Any]):
+        """Execute pre-conditioning steps for Pass/Fail tests before showing the dialog."""
+        from PyQt6.QtWidgets import QApplication
+
+        # Get source command from command bank
+        source_cmd = tp.get('source_command')
+        if not source_cmd and self._calibrator_commands:
+            for cmd_name in ["OUTPUT", "OUT", "SOURCE"]:
+                bank_cmd = self._get_calibrator_command(cmd_name)
+                if bank_cmd:
+                    source_cmd = bank_cmd
+                    break
+
+        if not source_cmd:
+            self.status_display.append("No OUTPUT command for pre-conditioning")
+            return
+
+        # Get operate command
+        operate_cmd = tp.get('operate_command')
+        if not operate_cmd:
+            operate_cmd = self._get_calibrator_command("OPERATE") or self._get_calibrator_command("OPER")
+
+        # Execute single pre-conditioning (existing field)
+        if self._has_preconditioning(tp):
+            pre_cmd = self._substitute_pre_placeholders(source_cmd, tp)
+            delay = tp.get('pre_delay_seconds', 0) or 0
+
+            self.status_display.append(f"Pre-conditioning: {pre_cmd}")
+            if self._send_calibrator_commands(pre_cmd, operate_cmd):
+                if delay > 0:
+                    self.status_display.append(f"Waiting {delay} seconds...")
+                    end_time = time.time() + delay
+                    while time.time() < end_time:
+                        QApplication.processEvents()
+                        time.sleep(0.1)
+            else:
+                self.status_display.append("WARNING: Pre-conditioning command failed")
+
+        # Execute additional pre-conditioning steps if defined (JSON array)
+        additional_steps = tp.get('pre_conditioning_steps', [])
+        if additional_steps:
+            for i, step in enumerate(additional_steps):
+                step_value = step.get('value', 0)
+                step_unit = step.get('unit', '')
+                step_freq = step.get('frequency', 0)
+                step_freq_unit = step.get('frequency_unit', 'Hz')
+                step_delay = step.get('delay', 0)
+
+                # Build command with step values
+                step_cmd = source_cmd
+                step_cmd = step_cmd.replace('{value}', str(step_value))
+                step_cmd = step_cmd.replace('{unit}', step_unit)
+                if step_freq:
+                    step_cmd = step_cmd.replace('{frequency}', str(step_freq))
+                    step_cmd = step_cmd.replace('{freq_hz}', str(step_freq))
+                else:
+                    # Remove frequency placeholder if not used
+                    step_cmd = step_cmd.replace(',{frequency} {freq_unit}', '')
+                    step_cmd = step_cmd.replace(',{frequency} HZ', '')
+                    step_cmd = step_cmd.replace(',{freq_hz} HZ', '')
+
+                self.status_display.append(f"Pre-conditioning step {i+2}: {step_cmd}")
+                if self._send_calibrator_commands(step_cmd, operate_cmd):
+                    if step_delay > 0:
+                        self.status_display.append(f"Waiting {step_delay} seconds...")
+                        end_time = time.time() + step_delay
+                        while time.time() < end_time:
+                            QApplication.processEvents()
+                            time.sleep(0.1)
+                else:
+                    self.status_display.append(f"WARNING: Pre-conditioning step {i+2} failed")
+
+        # Now output the main nominal value (if different from pre-conditioning)
+        nominal_value = tp.get('nominal_value', 0)
+        unit = tp.get('unit', '')
+        frequency = tp.get('frequency', 0)
+
+        # Build main output command
+        main_cmd = source_cmd
+        main_cmd = main_cmd.replace('{value}', str(nominal_value))
+        main_cmd = main_cmd.replace('{unit}', unit)
+        if frequency:
+            main_cmd = main_cmd.replace('{frequency}', str(frequency))
+            main_cmd = main_cmd.replace('{freq_hz}', str(frequency))
+        else:
+            main_cmd = main_cmd.replace(',{frequency} {freq_unit}', '')
+            main_cmd = main_cmd.replace(',{frequency} HZ', '')
+            main_cmd = main_cmd.replace(',{freq_hz} HZ', '')
+
+        self.status_display.append(f"Setting calibrator: {main_cmd}")
+        if not self._send_calibrator_commands(main_cmd, operate_cmd):
+            self.status_display.append("WARNING: Main output command failed")
+
+    def _execute_pass_fail_test(self, tp: Dict[str, Any]):
+        """Execute a Pass/Fail test by showing dialog to technician."""
+        prompt = tp.get('pass_fail_prompt') or "Does this test point pass?"
+
+        # Build test info string
+        nominal_str = f"{tp.get('nominal_value', '')} {tp.get('unit', '')}"
+        if tp.get('frequency'):
+            nominal_str += f" @ {tp['frequency']} {tp.get('frequency_unit', 'Hz')}"
+        test_info = f"{tp.get('section_name', '')} - {tp.get('description', nominal_str)}"
+
+        self.status_display.append(f"Pass/Fail Test: {prompt}")
+
+        # Show the Pass/Fail dialog
+        dialog = PassFailDialog(prompt, test_info, self)
+        dialog.exec()
+
+        result = dialog.get_result()
+
+        if result is None:
+            # Dialog was cancelled
+            self.status_display.append("Test cancelled")
+            return
+
+        row = self._current_test_index
+
+        if result:
+            # PASS
+            self.status_display.append("Result: PASS")
+            self.reading_input.setText("PASS")
+            self._record_pass_fail_result(tp, True)
+            # Update table
+            self.testpoints_table.setItem(row, 3, QTableWidgetItem("PASS"))
+            status_item = QTableWidgetItem("Pass")
+            status_item.setBackground(QColor(200, 255, 200))
+            self.testpoints_table.setItem(row, 4, status_item)
+        else:
+            # FAIL
+            self.status_display.append("Result: FAIL")
+            self.reading_input.setText("FAIL")
+            self._record_pass_fail_result(tp, False)
+            # Update table
+            self.testpoints_table.setItem(row, 3, QTableWidgetItem("FAIL"))
+            status_item = QTableWidgetItem("Fail")
+            status_item.setBackground(QColor(255, 200, 200))
+            self.testpoints_table.setItem(row, 4, status_item)
+
+        # Update progress bar
+        completed = self.progress_bar.value() + 1
+        self.progress_bar.setValue(completed)
+
+        # Advance to next test point
+        self._advance_to_next(row)
+
+    def _record_pass_fail_result(self, tp: Dict[str, Any], passed: bool):
+        """Record a Pass/Fail test result to the database."""
+        if not self._current_session_id:
+            return
+
+        db = get_db()
+        if not db.is_connected:
+            return
+
+        try:
+            with db.session() as session:
+                result = TestResult(
+                    session_id=self._current_session_id,
+                    test_point_id=tp['id'],
+                    measured_value=1.0 if passed else 0.0,  # Use 1/0 for pass/fail
+                    status=TestStatus.PASS if passed else TestStatus.FAIL,
+                    input_method=InputMethod.MANUAL,
+                )
+                session.add(result)
+
+            logger.info(f"Recorded Pass/Fail result: {'PASS' if passed else 'FAIL'} for test point {tp['id']}")
+
+        except Exception as e:
+            logger.error(f"Failed to record Pass/Fail result: {e}")
 
     def _on_capture_ocr(self):
         """Capture reading via webcam OCR."""
@@ -834,7 +2677,18 @@ class ExecutionTab(QWidget):
         deviation = 0.0
 
         if tp:
-            nominal = tp['nominal_value'] or 0
+            # Determine what value to compare against based on measurement_target
+            measurement_target = tp.get('measurement_target', 'PRIMARY')
+            if measurement_target == 'FREQUENCY':
+                # Compare reading to frequency field
+                nominal = tp.get('frequency') or 0
+            elif measurement_target == 'CUSTOM':
+                # Compare reading to custom expected_value
+                nominal = tp.get('expected_value') or 0
+            else:  # 'primary' or default
+                # Compare reading to nominal_value
+                nominal = tp['nominal_value'] or 0
+
             tolerance = tp['tolerance_value'] or 0
             tol_type = tp['tolerance_type']
 
@@ -908,7 +2762,6 @@ class ExecutionTab(QWidget):
                     measured_value=measured_value,
                     status="pass" if passed else "fail",
                     input_method=input_method,
-                    measured_at=datetime.now(),
                 )
                 session.add(result)
 
@@ -988,6 +2841,12 @@ class ExecutionTab(QWidget):
         """Handle session completion."""
         logger.info("Calibration session complete")
 
+        # Hide high voltage warning if active
+        self._hide_hv_warning()
+
+        # Put calibrator into standby
+        self._safe_shutdown_calibrator()
+
         # Calculate overall result
         fail_count = 0
         for i in range(self.testpoints_table.rowCount()):
@@ -1000,12 +2859,30 @@ class ExecutionTab(QWidget):
         # Update session in database
         self._complete_session(overall_result)
 
+        # Reset session state (but keep test points for preview)
+        self._current_session_id = None
+        self._current_section_id = None
+
         # Re-enable UI
         self.start_btn.setText("Start Session")
         self.start_btn.setEnabled(True)
+        self.continue_btn.setEnabled(True)
         self.dut_combo.setEnabled(True)
         self.workorder_input.setEnabled(True)
         self.procedure_combo.setEnabled(True)
+
+        # Disable control buttons
+        self.advance_btn.setEnabled(False)
+        self.pause_btn.setEnabled(False)
+        self.skip_btn.setEnabled(False)
+        self.redo_btn.setEnabled(False)
+        self.stop_btn.setEnabled(False)
+
+        # Reset display style
+        self.nominal_display.setStyleSheet(
+            "QLabel { background-color: #2d2d2d; color: #00ff00; "
+            "padding: 20px; border-radius: 10px; }"
+        )
 
         QMessageBox.information(
             self,
@@ -1031,7 +2908,7 @@ class ExecutionTab(QWidget):
                 ).first()
 
                 if cal_session:
-                    cal_session.status = SessionStatus.completed
+                    cal_session.status = "completed"
                     cal_session.completed_at = datetime.now()
                     cal_session.overall_result = overall_result.lower()
 
@@ -1072,7 +2949,7 @@ class ExecutionTab(QWidget):
                             CalibrationSession.id == self._current_session_id
                         ).first()
                         if cal_session:
-                            cal_session.status = SessionStatus.paused
+                            cal_session.status = "paused"
                 except Exception as e:
                     logger.error(f"Failed to pause session: {e}")
 
@@ -1098,7 +2975,7 @@ class ExecutionTab(QWidget):
                             CalibrationSession.id == self._current_session_id
                         ).first()
                         if cal_session:
-                            cal_session.status = SessionStatus.in_progress
+                            cal_session.status = "in_progress"
                 except Exception as e:
                     logger.error(f"Failed to resume session: {e}")
 
@@ -1113,14 +2990,21 @@ class ExecutionTab(QWidget):
         """Stop the session."""
         reply = QMessageBox.question(
             self,
-            "Stop Session",
-            "Are you sure you want to stop this session?\n\n"
+            "Terminate Session",
+            "Are you sure you want to terminate this session?\n\n"
+            "The calibrator will be put into STANDBY mode.\n"
             "Progress will be saved. The session will be marked as aborted.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
 
         if reply == QMessageBox.StandardButton.Yes:
             logger.info("Session stopped/aborted")
+
+            # Hide high voltage warning if active
+            self._hide_hv_warning()
+
+            # Put calibrator into standby and reset
+            self._safe_shutdown_calibrator()
 
             # Update database
             if self._current_session_id:
@@ -1132,26 +3016,56 @@ class ExecutionTab(QWidget):
                                 CalibrationSession.id == self._current_session_id
                             ).first()
                             if cal_session:
-                                cal_session.status = SessionStatus.aborted
+                                cal_session.status = "aborted"
                                 cal_session.completed_at = datetime.now()
                     except Exception as e:
                         logger.error(f"Failed to abort session: {e}")
 
-            # Reset session state
+            # Reset session state (but keep test points for preview)
             self._current_session_id = None
             self._current_dut_id = None
             self._current_procedure_id = None
-            self._test_points = []
+            self._current_section_id = None
+            # Keep self._test_points so user can still preview wiring diagrams
 
             # Re-enable UI
             self.start_btn.setText("Start Session")
             self.start_btn.setEnabled(True)
+            self.continue_btn.setEnabled(True)
             self.dut_combo.setEnabled(True)
             self.workorder_input.setEnabled(True)
             self.procedure_combo.setEnabled(True)
             self.pause_btn.setText("Pause")
 
+            # Disable control buttons
+            self.advance_btn.setEnabled(False)
+            self.pause_btn.setEnabled(False)
+            self.skip_btn.setEnabled(False)
+            self.redo_btn.setEnabled(False)
+            self.stop_btn.setEnabled(False)
+
+            # Reset display style
+            self.nominal_display.setStyleSheet(
+                "QLabel { background-color: #2d2d2d; color: #00ff00; "
+                "padding: 20px; border-radius: 10px; }"
+            )
+
             self.status_display.append("Session aborted")
+
+    def _on_advance(self):
+        """Manually advance to the next test point without recording a reading."""
+        row = self._current_test_index
+        if row >= len(self._test_points):
+            return
+
+        # Mark current as passed manually (no reading recorded)
+        status_item = self.testpoints_table.item(row, 4)
+        if status_item and status_item.text() == "Pending":
+            status_item.setText("Manual")
+            status_item.setBackground(QColor(255, 255, 200))  # Light yellow
+
+        self.status_display.append(f"Advanced past test point {row + 1}")
+        self._advance_to_next(row)
 
     def _on_skip(self):
         """Skip current test point."""
@@ -1169,21 +3083,209 @@ class ExecutionTab(QWidget):
             return
 
         row = selected[0].row()
-        logger.info(f"Redoing test point {row + 1}")
+
+        if not self._test_points or row >= len(self._test_points):
+            logger.debug(f"Redo row {row} but no test points loaded")
+            return
+
+        tp = self._test_points[row]
+        logger.info(f"Redoing test point {row + 1}: {tp.get('description', '')}")
 
         # Clear previous result from table
         self.testpoints_table.setItem(row, 3, QTableWidgetItem(""))
         self.testpoints_table.setItem(row, 4, QTableWidgetItem("Redo"))
 
-        # Update display
-        self._update_current_display(row)
+        # Update current index
+        self._current_test_index = row
+
+        self.status_display.append("=" * 40)
+        self.status_display.append(f"REDOING TEST POINT {row + 1}")
+
+        # Clear reading input
         self.reading_input.clear()
         self.reading_input.setFocus()
 
-        self.status_display.append(f"Redoing test point {row + 1}")
+        # Execute the test point (this will show Pass/Fail dialog for pass_fail tests)
+        self._update_current_display(row)
+
+    def _on_testpoint_clicked(self, row: int, column: int):
+        """Handle single-click on test point - select and prepare for execution."""
+        if not self._test_points or row >= len(self._test_points):
+            logger.debug(f"Clicked row {row} but no test points loaded")
+            return
+
+        # Update selection and current index
+        self._current_test_index = row
+        logger.info(f"Selected test point {row + 1}: {self._test_points[row].get('description', '')}")
+        self.status_display.append(f"Selected test point {row + 1}")
 
     def _on_testpoint_double_clicked(self, item):
-        """Handle double-click on test point."""
+        """Handle double-click on test point - safety-aware jump to test point."""
         row = item.row()
-        logger.debug(f"Double-clicked test point {row + 1}")
+
+        if not self._test_points or row >= len(self._test_points):
+            logger.debug(f"Double-clicked row {row} but no test points loaded")
+            return
+
+        tp = self._test_points[row]
+        section_id = tp.get('section_id')
+        section_name = tp.get('section_name', 'Unknown')
+        standard_section_type = tp.get('standard_section_type', '')
+
+        logger.info(f"Double-clicked test point {row + 1}: {tp.get('description', '')}")
+
+        # SAFETY CHECK 1: Not in session - just show wiring diagram, don't execute
+        if not self._current_session_id:
+            self.status_display.append("=" * 40)
+            self.status_display.append(f"PREVIEW: {section_name} / {tp.get('description', '')}")
+            self.status_display.append("(Not in session - showing wiring diagram only)")
+
+            # Update display info without executing
+            self.section_label.setText(section_name)
+            self.testpoint_label.setText(tp.get('description', ''))
+            nominal_str = f"{tp.get('nominal_value', 0)} {tp.get('unit', '')}"
+            if tp.get('frequency'):
+                nominal_str += f" @ {tp['frequency']} {tp.get('frequency_unit', 'Hz')}"
+            self.nominal_display.setText(nominal_str)
+
+            # Load and show wiring diagram
+            self._load_wiring_diagram(section_id, section_name, standard_section_type)
+
+            # Select the row but don't execute
+            self._current_test_index = row
+            self.testpoints_table.selectRow(row)
+            return
+
+        # SAFETY CHECK 2: Different section - show wiring confirmation first
+        if section_id != self._current_section_id:
+            self.status_display.append("=" * 40)
+            self.status_display.append(f"SECTION CHANGE: {section_name}")
+
+            # Load wiring diagram for the new section
+            self._load_wiring_diagram(section_id, section_name, standard_section_type)
+
+            # Show confirmation dialog with wiring info
+            reply = QMessageBox.question(
+                self,
+                "Section Change - Verify Wiring",
+                f"You are jumping to a different section:\n\n"
+                f"Section: {section_name}\n"
+                f"Test Point: {tp.get('description', '')}\n"
+                f"Nominal: {tp.get('nominal_value', 0)} {tp.get('unit', '')}\n\n"
+                f"Please verify the wiring diagram matches your setup.\n\n"
+                f"Do you want to proceed and execute this test point?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+
+            if reply != QMessageBox.StandardButton.Yes:
+                self.status_display.append("Jump cancelled - verify wiring before proceeding")
+                # Still select the row so they can see the wiring
+                self._current_test_index = row
+                self.testpoints_table.selectRow(row)
+                return
+
+        # SAFE TO EXECUTE: In session and same section (or user confirmed section change)
+        logger.info(f"Jumping to test point {row + 1}: {tp.get('description', '')}")
+
+        # Clear previous result for redo
+        self.testpoints_table.setItem(row, 3, QTableWidgetItem(""))
+        self.testpoints_table.setItem(row, 4, QTableWidgetItem("Redo"))
+
+        # Update current index
+        self._current_test_index = row
+
+        self.status_display.append("=" * 40)
+        self.status_display.append(f"JUMPING TO TEST POINT {row + 1}")
+        self.status_display.append(f"{section_name} / {tp.get('description', '')}")
+
+        # Clear reading input
+        self.reading_input.clear()
+
+        # Execute the test point (this will show Pass/Fail dialog for pass_fail tests)
         self._update_current_display(row)
+
+    # -------------------------------------------------------------------------
+    # High Voltage Warning
+    # -------------------------------------------------------------------------
+
+    def _check_high_voltage(self, nominal_value: float, unit: str):
+        """Check if voltage is >= 100V and show/hide warning accordingly."""
+        # Convert to volts for comparison
+        voltage_in_volts = nominal_value
+        unit_lower = unit.lower()
+
+        if 'mv' in unit_lower:
+            voltage_in_volts = nominal_value / 1000
+        elif 'uv' in unit_lower or 'µv' in unit_lower:
+            voltage_in_volts = nominal_value / 1000000
+        elif 'kv' in unit_lower:
+            voltage_in_volts = nominal_value * 1000
+
+        # Only check voltage units (V, mV, kV, etc.)
+        is_voltage = 'v' in unit_lower and 'ohm' not in unit_lower
+
+        if is_voltage and voltage_in_volts >= 100:
+            self._show_hv_warning()
+        else:
+            self._hide_hv_warning()
+
+    def _show_hv_warning(self):
+        """Show and start the high voltage warning animation."""
+        if self._hv_warning_active:
+            return  # Already showing
+
+        self._hv_warning_active = True
+        self.hv_warning_label.setVisible(True)
+
+        if self._hv_pixmap:
+            self.hv_warning_label.setPixmap(self._hv_pixmap)
+
+        self._hv_opacity_effect.setOpacity(1.0)
+        self._start_hv_fade_out()
+        logger.info("High voltage warning activated (>= 100V)")
+
+    def _hide_hv_warning(self):
+        """Hide and stop the high voltage warning animation."""
+        if not self._hv_warning_active:
+            return  # Already hidden
+
+        self._hv_warning_active = False
+        self._hv_fade_out.stop()
+        self._hv_fade_in.stop()
+        self._hv_delay_timer.stop()
+        self.hv_warning_label.setVisible(False)
+
+    def _start_hv_fade_out(self):
+        """Start fading out the warning."""
+        if not self._hv_warning_active:
+            return
+
+        # Get speed from settings
+        settings = get_settings()
+        speed = settings.ui.high_voltage_blink_speed_ms
+        duration = speed // 2
+
+        self._hv_fade_out.setDuration(duration)
+        self._hv_fade_out.setStartValue(1.0)
+        self._hv_fade_out.setEndValue(0.2)
+        self._hv_fade_out.start()
+
+    def _start_hv_fade_in(self):
+        """Start fading in the warning."""
+        if not self._hv_warning_active:
+            return
+
+        settings = get_settings()
+        speed = settings.ui.high_voltage_blink_speed_ms
+        duration = speed // 2
+
+        self._hv_fade_in.setDuration(duration)
+        self._hv_fade_in.setStartValue(0.2)
+        self._hv_fade_in.setEndValue(1.0)
+        self._hv_fade_in.start()
+
+    def _start_hv_fade_out_delayed(self):
+        """Start fade out after brief pause at full opacity."""
+        if not self._hv_warning_active:
+            return
+        self._hv_delay_timer.start(100)

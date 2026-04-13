@@ -8,12 +8,102 @@
 
 ## Codebase Patterns
 
+### General
 - Settings are stored in ~/.calsystem/config.json as JSON
 - Use get_settings() from calsystem.config.settings for accessing settings (cached)
 - Use reload_settings() to reload settings after changes
 - Database connection via get_db() returns singleton DatabaseManager
 - UI dialogs go in src/calsystem/ui/dialogs/ directory
 - PyQt6 dialogs should be modal and use QDialogButtonBox for standard buttons
+
+### Command Bank Architecture
+- **Purpose**: Maps generic Calsystem commands to device-specific SCPI commands
+- **Location**: Standards tab → "Command Bank..." button, or right-click on standard
+- **Generic names** defined in STANDARD_COMMANDS (models.py):
+  - IDENTITY, RESET, CLEAR, OPC (control)
+  - OUTPUT, OPERATE, STANDBY (calibrator output)
+  - OUTPUT_AC (AC with frequency - uses {frequency}, {freq_unit} placeholders)
+  - MEASURE_DCV, MEASURE_ACV, MEASURE_OHM, etc. (DMM)
+- **Placeholders**: {value}, {unit}, {frequency}, {freq_unit}
+- **Lookup flow**: Calsystem calls generic name → finds calibrator's command bank → returns actual SCPI
+- **Example**: OUTPUT → "OUT {value} {unit}" for Fluke, "SOURCE {value}{unit}" for others
+
+### Wiring Diagram Library
+- **Purpose**: Show correct wiring diagram based on calibrator + section type
+- **Location**: Libraries tab for adding images, Procedures tab for linking
+- **Standard section types** defined in STANDARD_SECTION_TYPES (models.py):
+  - DC Voltage, AC Voltage, DC Current, AC Current, Resistance 2W/4W, Frequency, etc.
+- **Auto-lookup**: calibrator_model + standard_section_type → library image
+- **Procedure sections** have: display name (custom) + standard_section_type (for lookup)
+
+### Execution Flow (Run Test tab)
+1. Select DUT, work order, procedure
+2. Click "Start Session" → detects calibrators from workstation (only active standards)
+3. Loads command bank for selected calibrator
+4. For each NEW SECTION:
+   - Shows wiring diagram FIRST
+   - Confirmation dialog: "Verify wiring, click OK when ready"
+   - THEN sends calibrator output
+5. For each test point: calibrator outputs → user enters reading → pass/fail calculated
+6. On terminate/complete: sends STANDBY and RESET to calibrator
+
+### Workstation Setup
+- **Standards tab**: Add calibrators, DMMs, counters to workstation
+- **Active checkbox**: Only active standards are scanned during session startup
+- **Command Bank**: Each standard needs a command bank for automated control
+- **Warning icon (⚠)**: Shown if standard has no command bank
+
+### Reference DMM (HP 3458A)
+- Test types: DMM_MEASUREMENT (no calibrator), CALIBRATOR_DMM (both)
+- Unit conversion: 3458A returns base units (V), convert to test unit (mV)
+- Commands: RESET, END ALWAYS, OFORMAT ASCII, DCV AUTO, TRIG SGL
+
+### Measurement Target (Test Points)
+- **Purpose**: Specify which parameter the reading should be compared against
+- **Options** (MeasurementTarget enum):
+  - PRIMARY (default): Compare reading to nominal_value (e.g., 5V)
+  - FREQUENCY: Compare reading to frequency field (e.g., 100Hz)
+  - CUSTOM: Compare reading to custom expected_value/expected_unit
+- **Use case**: Testing AC voltage @ frequency - user may need to verify FREQUENCY reading, not voltage
+- **UI location**: Procedures tab → Test Point Details → "Measure:" dropdown
+- **Display**: When FREQUENCY or CUSTOM, nominal display shows expected reading + (CAL: output)
+
+### Test Point Wiring Diagrams
+- **Purpose**: Individual test points can have their own wiring diagram (override section diagram)
+- **Field**: TestPoint.wiring_diagram_type references WiringDiagramLibrary.section_type
+- **UI location**: Procedures tab → Test Point Details → "Wiring:" dropdown
+- **Options**: "None" (default) or any section_type from the library
+- **Execution flow**: If test point has wiring_diagram_type set:
+  1. Load diagram from library
+  2. Show confirmation dialog
+  3. Then proceed with calibrator output
+- **Use case**: Some test points need different wiring than the section default
+  - Example: DCV test section but one point needs current input wiring to measure 0.2-0.33mA
+
+### Custom Section Types
+- **Purpose**: Allow users to add custom section types beyond the built-in list
+- **Model**: SectionType table with name, description, is_builtin flag
+- **UI location**: Libraries tab → "Section Types..." button
+- **Management**: Dialog to view all types, add new custom types, delete custom types
+- **Built-in types**: Seeded from STANDARD_SECTION_TYPES, cannot be deleted
+- **Usage**: All section type dropdowns now use get_all_section_types() which returns both built-in and custom types
+
+### Build & Deployment
+- **IMPORTANT**: Always rebuild the exe after making code changes: `build_onefile.bat`
+- The built exe is at `dist/Calsystem.exe` - this is what users run
+- Source code changes do NOT affect the exe until rebuilt
+- Config mismatch errors (e.g., "Extra inputs not permitted") usually mean exe is out of date
+- Resources (images, templates) go in `resources/` folder - already bundled by PyInstaller
+- For bundled resources, use `sys._MEIPASS` when `sys.frozen` is True (see execution_tab.py for example)
+
+### Session Notes
+- Always add progress notes at end of session documenting what was changed
+- Update Codebase Patterns section if you discover reusable patterns
+- Rebuild exe before ending session if any code was modified
+- **Dropdowns updated**:
+  - Libraries tab → Add Image dialog → Section Type dropdown
+  - Procedures tab → Add Section dialog → Standard Type dropdown
+  - Procedures tab → Test Point Details → Wiring dropdown
 
 ---
 
@@ -323,4 +413,192 @@
   - Reports and history (US-030 to US-035)
   - User preferences and logging (US-036, US-037)
   - Wiring diagrams (US-038)
+---
+
+## 2026-04-07 - Post-MVP Enhancements
+
+### Wiring Diagram Library System (Standard Section Types)
+- **What was implemented:**
+  - Added STANDARD_SECTION_TYPES list to models.py (DC Voltage, AC Voltage, Resistance, etc.)
+  - Added `standard_section_type` field to TestSection model for diagram auto-lookup
+  - Created SectionEditDialog for editing section name + standard type together
+  - Updated Procedures tab: Add/Edit Section now uses dialog with Standard Type dropdown
+  - Updated Libraries tab: Section dropdown uses STANDARD_SECTION_TYPES instead of free text
+  - Updated execution_tab _load_wiring_diagram() to auto-lookup by calibrator + standard_section_type
+  - Database migration for standard_section_type column in test_sections table
+- **Files changed:**
+  - src/calsystem/database/models.py (STANDARD_SECTION_TYPES, TestSection.standard_section_type)
+  - src/calsystem/database/connection.py (migration for new column)
+  - src/calsystem/ui/procedures/procedures_tab.py (SectionEditDialog, edit section button)
+  - src/calsystem/ui/libraries/libraries_tab.py (dropdown for section type)
+  - src/calsystem/ui/execution/execution_tab.py (auto-lookup by standard_section_type)
+- **Learnings:**
+  - Wiring diagrams work best when organized by: calibrator_model + standard_section_type
+  - Section has two names: display name (user custom) + standard_type (for diagram lookup)
+  - Auto-lookup priority: standard_section_type match > SectionDiagramLink > legacy WiringDiagram > fuzzy match
+
+### Workstation Active Checkboxes
+- **What was implemented:**
+  - Added `is_active` column to WorkstationStandard model
+  - Checkbox column in workstation standards table
+  - Only active standards are scanned during session startup (faster)
+  - Database migration for is_active column
+- **Files changed:**
+  - src/calsystem/database/models.py
+  - src/calsystem/database/connection.py
+  - src/calsystem/ui/workstation/workstation_tab.py
+  - src/calsystem/ui/execution/execution_tab.py
+
+### Run Test (Execution) Tab Improvements
+- **What was implemented:**
+  - Better status feedback during session start ("Starting session...", "Detecting calibrators...", etc.)
+  - New control buttons: Advance (green), Pause, Skip, Redo, Terminate Session (red)
+  - Buttons enable/disable based on session state
+  - Auto-send calibrator output when test point is displayed
+  - Visual indicator (green border) on nominal display when session active
+- **Files changed:**
+  - src/calsystem/ui/execution/execution_tab.py
+- **Learnings:**
+  - _set_calibrator_output() should be called from _update_current_display()
+  - Control buttons should be disabled until session starts
+  - Status display is essential for user feedback during execution
+
+### Reference DMM (HP 3458A) Integration
+- **What was implemented:**
+  - Added TestPointType.DMM_MEASUREMENT and CALIBRATOR_DMM test types
+  - Added unit conversion for DMM readings (_convert_to_test_unit)
+  - DMM initialization sends: RESET, END ALWAYS, OFORMAT ASCII
+  - DMM measurement uses: DCV AUTO, TRIG SGL
+- **Files changed:**
+  - src/calsystem/database/models.py (TestPointType enum)
+  - src/calsystem/ui/execution/execution_tab.py
+
+### Calibrator Safety Shutdown
+- **What was implemented:**
+  - Added _safe_shutdown_calibrator() method - sends STBY and *RST to calibrator
+  - Called on session terminate (user clicks "Terminate Session")
+  - Called on session complete (all test points done)
+  - Status display shows shutdown commands being sent
+- **Files changed:**
+  - src/calsystem/ui/execution/execution_tab.py
+
+### Wiring Diagram Confirmation Flow
+- **What was implemented:**
+  - Track current section with _current_section_id
+  - When entering a new section, show wiring diagram FIRST
+  - Display confirmation dialog asking user to verify wiring
+  - Only send calibrator output AFTER user clicks OK
+  - If user clicks Cancel, pause and wait for confirmation
+- **Files changed:**
+  - src/calsystem/ui/execution/execution_tab.py
+- **Learnings:**
+  - Safety: Always show wiring before outputting voltage/current
+  - User must confirm connections match diagram before proceeding
+  - Section change detection: compare section_id with _current_section_id
+
+### Standard Command Bank Architecture
+- **What was implemented:**
+  - Added STANDARD_COMMANDS dict to models.py with generic command names:
+    - IDENTITY, RESET, CLEAR, OPC (control)
+    - OUTPUT, OPERATE, STANDBY (calibrator output)
+    - OUTPUT_AC (AC with frequency)
+    - MEASURE_DCV, MEASURE_ACV, MEASURE_DCI, MEASURE_ACI, MEASURE_OHM, MEASURE_OHM4 (DMM)
+    - TRIGGER, READ (measurement)
+  - Each command has: description, default value, required flag
+  - Updated CommandBankDialog:
+    - 3 columns: Generic Name, SCPI Command, Description
+    - "Add Standard Commands" populates all standard commands
+    - Required commands highlighted in yellow
+    - Help text explains placeholder usage
+  - Updated execution_tab to use standard names:
+    - OUTPUT/OUTPUT_AC for setting calibrator output
+    - OPERATE for turning on output
+    - STANDBY for turning off output
+    - RESET for resetting calibrator
+- **Files changed:**
+  - src/calsystem/database/models.py (STANDARD_COMMANDS)
+  - src/calsystem/ui/dialogs/command_bank_dialog.py
+  - src/calsystem/ui/execution/execution_tab.py
+- **Learnings:**
+  - Generic names allow any calibrator to work once command bank is set up
+  - Lookup order: test point specific > OUTPUT_AC (if freq) > OUTPUT > legacy names
+  - Always fallback to legacy names (OUT, OPER, STBY) for backwards compatibility
+
+### Run Test UI Layout Improvements
+- **What was implemented:**
+  - Session Setup: Removed GroupBox, made compact single-row layout with minimal margins
+  - Instrument Status: Reduced max height to 80px
+  - Wiring Diagram: Increased min height to 250px, added stretch=2, expanding size policy
+  - Nominal Display: Fixed text clipping - uses stylesheet font-size, min height 80px, word wrap
+- **Files changed:**
+  - src/calsystem/ui/execution/execution_tab.py
+- **Learnings:**
+  - Use stretch parameter in addWidget() to control relative sizing
+  - QSizePolicy.Expanding allows widget to grow with window
+  - Stylesheet font-size is more flexible than QFont for responsive layouts
+
+### Measurement Target Feature
+- **What was implemented:**
+  - Added MeasurementTarget enum: PRIMARY, FREQUENCY, CUSTOM
+  - Added measurement_target, expected_value, expected_unit fields to TestPoint model
+  - Database migration for new columns (SQLite and MySQL)
+  - Procedures tab: "Measure:" dropdown to select what reading to compare against
+  - Custom value fields shown when "Custom" is selected
+  - Execution tab: Uses measurement_target to determine pass/fail comparison
+  - Nominal display shows expected reading prominently with (CAL: output) when measuring frequency/custom
+- **Files changed:**
+  - src/calsystem/database/models.py (MeasurementTarget enum, TestPoint fields)
+  - src/calsystem/database/connection.py (migration)
+  - src/calsystem/ui/procedures/procedures_tab.py (UI and load/save)
+  - src/calsystem/ui/execution/execution_tab.py (pass/fail logic and display)
+- **Use case:**
+  - AC voltage test at 5V 100Hz - user needs to verify FREQUENCY (100Hz) not voltage
+  - Set "Measure:" to "Frequency" so reading is compared against 100Hz
+  - Display shows "100 Hz (CAL: 5 V @ 100 Hz)"
+
+---
+
+## 2026-04-13 - Maintenance: High Voltage Image Fix & Build Process
+
+### Issue Fixed
+- App failed to start with "Extra inputs not permitted" error for `high_voltage_blink_speed_ms`
+- High voltage warning image not displaying in Libraries tab or Execution tab
+
+### Root Cause
+- Built exe was outdated - source code had new settings fields not in the compiled exe
+- Image path resolution didn't work in PyInstaller bundled mode
+
+### Changes Made
+1. **Fixed image path for bundled exe** - Both execution_tab.py and libraries_tab.py now use:
+   ```python
+   if getattr(sys, 'frozen', False):
+       base_path = sys._MEIPASS
+   else:
+       base_path = os.path.dirname(...)
+   hv_image_path = os.path.join(base_path, "resources", "images", "HighVoltage.png")
+   ```
+
+2. **Resized high voltage image** - 1024x1024 (1.8MB) → 120x120 (22KB) using LANCZOS
+   - Saved to `resources/images/HighVoltage.png`
+
+3. **Updated build scripts** to include Images folder:
+   - build_onefile.bat: Added `--add-data "Images;Images"`
+   - calsystem.spec: Added `('Images', 'Images')` to datas
+
+4. **Added Codebase Patterns** for build process and session notes
+
+### Files Changed
+- src/calsystem/ui/execution/execution_tab.py
+- src/calsystem/ui/libraries/libraries_tab.py
+- build_onefile.bat
+- calsystem.spec
+- resources/images/HighVoltage.png (new resized image)
+- progress.txt
+
+### Learnings
+- Always rebuild exe after code changes: `build_onefile.bat`
+- Use `sys._MEIPASS` for bundled resource paths when `sys.frozen` is True
+- Put bundled resources in `resources/` folder (already in PyInstaller config)
+- Config field mismatches cause "Extra inputs not permitted" errors
+
 ---
