@@ -578,6 +578,53 @@ class SectionType(Base):
 # =============================================================================
 
 
+class CommandReference(Base):
+    """Generic command reference names that get mapped to actual commands per model.
+
+    Examples: "Source", "Measure", "Standby", "Reset"
+    Each calibrator/DMM model maps these references to their actual SCPI commands.
+    """
+
+    __tablename__ = "command_references"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(50), nullable=False, unique=True)
+    description = Column(String(200), nullable=True)
+    default_command = Column(String(200), nullable=True, comment="Default SCPI command if common")
+    is_builtin = Column(Boolean, default=False, comment="True for system-defined references")
+    category = Column(String(50), nullable=True, comment="Group: output, measure, control, etc.")
+    created_at = Column(DateTime, server_default=func.now())
+
+    __table_args__ = (
+        Index("ix_command_reference_name", "name"),
+    )
+
+
+# Default command references (seeded on first run)
+DEFAULT_COMMAND_REFERENCES = [
+    # Control
+    {"name": "Reset", "description": "Reset instrument to default state", "default_command": "*RST", "category": "control"},
+    {"name": "Clear", "description": "Clear status/errors", "default_command": "*CLS", "category": "control"},
+    {"name": "Identity", "description": "Query instrument identity", "default_command": "*IDN?", "category": "control"},
+
+    # Output (Calibrators)
+    {"name": "Source", "description": "Output a value (voltage, current, etc.)", "default_command": "OUT {value} {unit}", "category": "output"},
+    {"name": "Source AC", "description": "Output AC with frequency", "default_command": "OUT {value} {unit}, {frequency} {freq_unit}", "category": "output"},
+    {"name": "Operate", "description": "Enable output (turn on)", "default_command": "OPER", "category": "output"},
+    {"name": "Standby", "description": "Disable output (safe/off)", "default_command": "STBY", "category": "output"},
+
+    # Measurement (DMMs)
+    {"name": "Measure DCV", "description": "Set DMM to measure DC voltage", "default_command": "DCV AUTO", "category": "measure"},
+    {"name": "Measure ACV", "description": "Set DMM to measure AC voltage", "default_command": "ACV AUTO", "category": "measure"},
+    {"name": "Measure DCI", "description": "Set DMM to measure DC current", "default_command": "DCI AUTO", "category": "measure"},
+    {"name": "Measure ACI", "description": "Set DMM to measure AC current", "default_command": "ACI AUTO", "category": "measure"},
+    {"name": "Measure Ohms", "description": "Set DMM to measure resistance (2-wire)", "default_command": "OHM AUTO", "category": "measure"},
+    {"name": "Measure Ohms 4W", "description": "Set DMM to measure resistance (4-wire)", "default_command": "OHMF AUTO", "category": "measure"},
+    {"name": "Trigger", "description": "Trigger a measurement", "default_command": "TRIG SGL", "category": "measure"},
+    {"name": "Read", "description": "Read measurement value", "default_command": "", "category": "measure"},
+]
+
+
 class CommandBank(Base):
     """Command set for a specific device model."""
 
