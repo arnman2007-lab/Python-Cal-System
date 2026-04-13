@@ -16,17 +16,18 @@
 - UI dialogs go in src/calsystem/ui/dialogs/ directory
 - PyQt6 dialogs should be modal and use QDialogButtonBox for standard buttons
 
-### Command Bank Architecture
-- **Purpose**: Maps generic Calsystem commands to device-specific SCPI commands
-- **Location**: Standards tab → "Command Bank..." button, or right-click on standard
-- **Generic names** defined in STANDARD_COMMANDS (models.py):
-  - IDENTITY, RESET, CLEAR, OPC (control)
-  - OUTPUT, OPERATE, STANDBY (calibrator output)
-  - OUTPUT_AC (AC with frequency - uses {frequency}, {freq_unit} placeholders)
-  - MEASURE_DCV, MEASURE_ACV, MEASURE_OHM, etc. (DMM)
+### Command Reference Architecture (NEW)
+- **Purpose**: Maps generic command references to device-specific SCPI commands
+- **Location**: Workstation tab → Select standard → "Command Bank" tab (inline editor)
+- **CommandReference model** stores: name, description, default_command, category, is_builtin
+- **15 default references** seeded on startup (see DEFAULT_COMMAND_REFERENCES in models.py):
+  - Control: Reset, Clear, Identity, OperationComplete
+  - Output: Source, Operate, Standby, SetRange
+  - AC: SourceAC, SetFrequency
+  - Measurement: Measure, Trigger, Read, Configure, Fetch
 - **Placeholders**: {value}, {unit}, {frequency}, {freq_unit}
-- **Lookup flow**: Calsystem calls generic name → finds calibrator's command bank → returns actual SCPI
-- **Example**: OUTPUT → "OUT {value} {unit}" for Fluke, "SOURCE {value}{unit}" for others
+- **UI indicators**: `[CMD]` shown in standards list for models with command banks
+- **Workflow**: Select standard → Command Bank tab → Add references → Map to SCPI → Save
 
 ### Wiring Diagram Library
 - **Purpose**: Show correct wiring diagram based on calibrator + section type
@@ -555,6 +556,40 @@
   - AC voltage test at 5V 100Hz - user needs to verify FREQUENCY (100Hz) not voltage
   - Set "Measure:" to "Frequency" so reading is compared against 100Hz
   - Display shows "100 Hz (CAL: 5 V @ 100 Hz)"
+
+---
+
+## 2026-04-13 - Command Reference System Implementation
+
+### What was implemented
+- **CommandReference model** added to models.py with 15 default command references
+- **New architecture**: Generic references (Source, Measure, Reset) map to device-specific SCPI commands
+- **Workstation tab overhaul**:
+  - Removed Setup bar (Configuration dropdown, Save As, Load buttons)
+  - Streamlined to checkbox-based standard selection (auto-saves)
+  - Moved Scan/Refresh buttons to bottom of left panel
+  - Added tabbed interface: "Details" tab + "Command Bank" tab
+- **Inline Command Bank editor** replaces popup dialog:
+  - Reference dropdown to select from available references
+  - "Add to Mappings" adds selected reference to mappings table
+  - "Add All References" button adds all 15 references at once
+  - "Save Command Bank" persists mappings to database
+- **Standards list shows `[CMD]` indicator** for models with command banks configured
+- **15 default command references** seeded on startup:
+  - Control: Reset, Clear, Identity, OperationComplete
+  - Output: Source, Operate, Standby, SetRange
+  - AC Output: SourceAC, SetFrequency
+  - Measurement: Measure, Trigger, Read, Configure, Fetch
+
+### Files Changed
+- src/calsystem/database/models.py - Added CommandReference model and DEFAULT_COMMAND_REFERENCES
+- src/calsystem/ui/workstation/workstation_tab.py - Complete rewrite with tabbed interface
+
+### Learnings
+- Command references provide abstraction layer between generic commands and device-specific SCPI
+- Inline editing is more efficient than popup dialogs for frequently-used features
+- Checkbox-based configuration auto-saves, reducing manual save/load steps
+- `[CMD]` indicator in standards list provides quick visibility of configuration status
 
 ---
 
