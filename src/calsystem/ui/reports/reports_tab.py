@@ -251,7 +251,7 @@ class ReportsTab(QWidget):
                     self.sessions_table.setItem(row, 2, QTableWidgetItem(cal_session.work_order or "--"))
 
                     # Technician
-                    self.sessions_table.setItem(row, 3, QTableWidgetItem(cal_session.technician or "--"))
+                    self.sessions_table.setItem(row, 3, QTableWidgetItem(cal_session.technician_name or "--"))
 
                     # Result
                     result = (cal_session.overall_result or cal_session.status.value).title()
@@ -310,7 +310,7 @@ class ReportsTab(QWidget):
                 self.detail_date.setText(
                     cal_session.started_at.strftime("%Y-%m-%d %H:%M") if cal_session.started_at else "--"
                 )
-                self.detail_technician.setText(cal_session.technician or "--")
+                self.detail_technician.setText(cal_session.technician_name or "--")
 
                 result = (cal_session.overall_result or cal_session.status.value).title()
                 self.detail_result.setText(result)
@@ -330,7 +330,7 @@ class ReportsTab(QWidget):
                     "dut_info": f"{dut.make} {dut.model} S/N: {dut.serial_number}" if dut else "",
                     "work_order": cal_session.work_order,
                     "date": cal_session.started_at,
-                    "technician": cal_session.technician,
+                    "technician": cal_session.technician_name,
                     "result": result,
                     "procedure": procedure.name if procedure else "",
                 }

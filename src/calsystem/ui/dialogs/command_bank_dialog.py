@@ -24,21 +24,11 @@ from PyQt6.QtWidgets import (
     QLabel,
 )
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QColor
 from loguru import logger
 
 from calsystem.database.connection import get_db
-from calsystem.database.models import CommandBank
-
-
-# Default commands to pre-populate for new command banks
-DEFAULT_COMMANDS = {
-    "IDN": "*IDN?",
-    "RST": "*RST",
-    "CLS": "*CLS",
-    "OPC": "*OPC?",
-    "OPER": "OPER",
-    "STBY": "STBY",
-}
+from calsystem.database.models import CommandBank, STANDARD_COMMANDS
 
 
 class CommandBankDialog(QDialog):
@@ -133,13 +123,24 @@ class CommandBankDialog(QDialog):
         right_layout.addWidget(info_group)
 
         # Commands
-        cmd_group = QGroupBox("Commands")
+        cmd_group = QGroupBox("Commands (Generic Name → Actual SCPI Command)")
         cmd_layout = QVBoxLayout(cmd_group)
 
+        # Help text
+        help_label = QLabel(
+            "Map Calsystem's generic command names to this device's actual SCPI commands.\n"
+            "Use {value}, {unit}, {frequency}, {freq_unit} as placeholders in OUTPUT commands."
+        )
+        help_label.setStyleSheet("color: gray; font-size: 11px;")
+        help_label.setWordWrap(True)
+        cmd_layout.addWidget(help_label)
+
         self.cmd_table = QTableWidget()
-        self.cmd_table.setColumnCount(2)
-        self.cmd_table.setHorizontalHeaderLabels(["Command Name", "SCPI String"])
-        self.cmd_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.cmd_table.setColumnCount(3)
+        self.cmd_table.setHorizontalHeaderLabels(["Generic Name", "SCPI Command", "Description"])
+        self.cmd_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.cmd_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.cmd_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         cmd_layout.addWidget(self.cmd_table)
 
         cmd_btn_layout = QHBoxLayout()
@@ -151,7 +152,7 @@ class CommandBankDialog(QDialog):
         self.remove_cmd_btn.clicked.connect(self._on_remove_command)
         cmd_btn_layout.addWidget(self.remove_cmd_btn)
 
-        self.populate_defaults_btn = QPushButton("Add Defaults")
+        self.populate_defaults_btn = QPushButton("Add Standard Commands")
         self.populate_defaults_btn.clicked.connect(self._on_populate_defaults)
         cmd_btn_layout.addWidget(self.populate_defaults_btn)
 
@@ -263,6 +264,13 @@ class CommandBankDialog(QDialog):
             self.cmd_table.insertRow(row)
             self.cmd_table.setItem(row, 0, QTableWidgetItem(name))
             self.cmd_table.setItem(row, 1, QTableWidgetItem(scpi))
+            # Add description from STANDARD_COMMANDS if available
+            desc = ""
+            if name in STANDARD_COMMANDS:
+                desc = STANDARD_COMMANDS[name].get("description", "")
+            desc_item = QTableWidgetItem(desc)
+            desc_item.setFlags(desc_item.flags() & ~Qt.ItemFlag.ItemIsEditable)  # Read-only
+            self.cmd_table.setItem(row, 2, desc_item)
 
     def _on_new_bank(self):
         """Create a new command bank."""
@@ -316,6 +324,7 @@ class CommandBankDialog(QDialog):
         self.cmd_table.insertRow(row)
         self.cmd_table.setItem(row, 0, QTableWidgetItem(""))
         self.cmd_table.setItem(row, 1, QTableWidgetItem(""))
+        self.cmd_table.setItem(row, 2, QTableWidgetItem("Custom command"))
         self.cmd_table.editItem(self.cmd_table.item(row, 0))
 
     def _on_remove_command(self):
@@ -325,20 +334,35 @@ class CommandBankDialog(QDialog):
             self.cmd_table.removeRow(selected[0].row())
 
     def _on_populate_defaults(self):
-        """Add default commands to the table."""
-        for name, scpi in DEFAULT_COMMANDS.items():
+        """Add all standard commands to the table with their default values."""
+        for name, info in STANDARD_COMMANDS.items():
             # Check if already exists
             exists = False
             for row in range(self.cmd_table.rowCount()):
-                if self.cmd_table.item(row, 0).text() == name:
+                item = self.cmd_table.item(row, 0)
+                if item and item.text() == name:
                     exists = True
                     break
 
             if not exists:
                 row = self.cmd_table.rowCount()
                 self.cmd_table.insertRow(row)
-                self.cmd_table.setItem(row, 0, QTableWidgetItem(name))
-                self.cmd_table.setItem(row, 1, QTableWidgetItem(scpi))
+
+                # Name (read-only for standard commands)
+                name_item = QTableWidgetItem(name)
+                self.cmd_table.setItem(row, 0, name_item)
+
+                # Default SCPI command (editable - user customizes for their device)
+                self.cmd_table.setItem(row, 1, QTableWidgetItem(info.get("default", "")))
+
+                # Description (read-only)
+                desc_item = QTableWidgetItem(info.get("description", ""))
+                desc_item.setFlags(desc_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                self.cmd_table.setItem(row, 2, desc_item)
+
+                # Highlight required commands
+                if info.get("required"):
+                    name_item.setBackground(QColor(255, 255, 200))  # Light yellow
 
     def _on_save(self):
         """Save the current command bank."""

@@ -178,9 +178,9 @@ class WorkstationTab(QWidget):
         standards_layout.addLayout(filter_layout)
 
         self.standards_table = QTableWidget()
-        self.standards_table.setColumnCount(7)
+        self.standards_table.setColumnCount(8)
         self.standards_table.setHorizontalHeaderLabels(
-            ["Group", "Make", "Model", "Serial", "STD ID", "Address", "Status"]
+            ["Active", "Group", "Make", "Model", "Serial", "STD ID", "Address", "Status"]
         )
         self.standards_table.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.Stretch
@@ -190,6 +190,7 @@ class WorkstationTab(QWidget):
         )
         self.standards_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.standards_table.customContextMenuRequested.connect(self._on_standards_context_menu)
+        self.standards_table.itemChanged.connect(self._on_standard_item_changed)
         standards_layout.addWidget(self.standards_table)
 
         standards_btn_layout = QHBoxLayout()
@@ -352,6 +353,7 @@ class WorkstationTab(QWidget):
                         "std_id": standard.std_id or "",
                         "address": ws_standard.visa_address or standard.visa_address or "",
                         "has_command_bank": has_command_bank,
+                        "is_active": ws_standard.is_active if ws_standard.is_active is not None else True,
                     })
 
                 self._populate_standards_table()
@@ -380,15 +382,21 @@ class WorkstationTab(QWidget):
             row = self.standards_table.rowCount()
             self.standards_table.insertRow(row)
 
-            group_item = QTableWidgetItem(data["group"].title())
-            group_item.setData(Qt.ItemDataRole.UserRole, data["ws_standard_id"])
-            self.standards_table.setItem(row, 0, group_item)
+            # Active checkbox (column 0)
+            active_item = QTableWidgetItem()
+            active_item.setFlags(active_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            active_item.setCheckState(Qt.CheckState.Checked if data.get("is_active", True) else Qt.CheckState.Unchecked)
+            active_item.setData(Qt.ItemDataRole.UserRole, data["ws_standard_id"])
+            self.standards_table.setItem(row, 0, active_item)
 
-            self.standards_table.setItem(row, 1, QTableWidgetItem(data["make"]))
-            self.standards_table.setItem(row, 2, QTableWidgetItem(data["model"]))
-            self.standards_table.setItem(row, 3, QTableWidgetItem(data["serial"]))
-            self.standards_table.setItem(row, 4, QTableWidgetItem(data["std_id"]))
-            self.standards_table.setItem(row, 5, QTableWidgetItem(data["address"]))
+            group_item = QTableWidgetItem(data["group"].title())
+            self.standards_table.setItem(row, 1, group_item)
+
+            self.standards_table.setItem(row, 2, QTableWidgetItem(data["make"]))
+            self.standards_table.setItem(row, 3, QTableWidgetItem(data["model"]))
+            self.standards_table.setItem(row, 4, QTableWidgetItem(data["serial"]))
+            self.standards_table.setItem(row, 5, QTableWidgetItem(data["std_id"]))
+            self.standards_table.setItem(row, 6, QTableWidgetItem(data["address"]))
 
             if data.get("has_command_bank", True):
                 status_item = QTableWidgetItem("OK")
@@ -397,7 +405,42 @@ class WorkstationTab(QWidget):
                 status_item = QTableWidgetItem("\u26A0 No Commands")
                 status_item.setForeground(QColor("orange"))
                 status_item.setToolTip(f"No command bank for {data['make']} {data['model']}")
-            self.standards_table.setItem(row, 6, status_item)
+            self.standards_table.setItem(row, 7, status_item)
+
+    def _on_standard_item_changed(self, item):
+        """Handle changes to standards table items (checkbox clicks)."""
+        # Only handle checkbox changes in column 0
+        if item.column() != 0:
+            return
+
+        ws_standard_id = item.data(Qt.ItemDataRole.UserRole)
+        if not ws_standard_id:
+            return
+
+        is_active = item.checkState() == Qt.CheckState.Checked
+
+        db = get_db()
+        if not db.is_connected:
+            return
+
+        try:
+            with db.session() as session:
+                ws_standard = session.query(WorkstationStandard).filter(
+                    WorkstationStandard.id == ws_standard_id
+                ).first()
+
+                if ws_standard:
+                    ws_standard.is_active = is_active
+                    # Update local data too
+                    for data in self._standards_data:
+                        if data["ws_standard_id"] == ws_standard_id:
+                            data["is_active"] = is_active
+                            break
+
+                    logger.debug(f"Standard {ws_standard_id} active state: {is_active}")
+
+        except Exception as e:
+            logger.error(f"Failed to update standard active state: {e}")
 
     def _on_standards_context_menu(self, position):
         """Show context menu for standards table."""
@@ -406,15 +449,15 @@ class WorkstationTab(QWidget):
             return
 
         row = selected[0].row()
-        make = self.standards_table.item(row, 1).text()
-        model = self.standards_table.item(row, 2).text()
+        make = self.standards_table.item(row, 2).text()
+        model = self.standards_table.item(row, 3).text()
 
         menu = QMenu(self)
 
         cmd_action = menu.addAction("Command Bank...")
         cmd_action.triggered.connect(self._on_command_bank)
 
-        status_item = self.standards_table.item(row, 6)
+        status_item = self.standards_table.item(row, 7)
         if status_item and "No Commands" in status_item.text():
             create_action = menu.addAction(f"Create Command Bank for {make} {model}...")
             create_action.triggered.connect(

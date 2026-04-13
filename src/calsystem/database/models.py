@@ -42,6 +42,8 @@ class TestPointType(PyEnum):
     MEASUREMENT = "measurement"
     PASS_FAIL = "pass_fail"
     CALCULATED = "calculated"
+    DMM_MEASUREMENT = "dmm_measurement"  # 3458A measures (no calibrator output)
+    CALIBRATOR_DMM = "calibrator_dmm"  # Calibrator outputs AND 3458A measures
 
 
 class ToleranceType(PyEnum):
@@ -50,6 +52,14 @@ class ToleranceType(PyEnum):
     PERCENT = "percent"
     ABSOLUTE = "absolute"
     PPM = "ppm"
+
+
+class MeasurementTarget(PyEnum):
+    """What parameter to compare reading against."""
+
+    PRIMARY = "PRIMARY"      # Compare to nominal_value (default)
+    FREQUENCY = "FREQUENCY"  # Compare to frequency field
+    CUSTOM = "CUSTOM"        # Compare to expected_value field
 
 
 class InputMethod(PyEnum):
@@ -76,6 +86,148 @@ class SessionStatus(PyEnum):
     PAUSED = "paused"
     COMPLETED = "completed"
     ABORTED = "aborted"
+
+
+# Standard section types for wiring diagram lookup
+# These are the internal standard names that link procedures to library images
+STANDARD_SECTION_TYPES = [
+    "DC Voltage",
+    "AC Voltage",
+    "DC Current",
+    "AC Current",
+    "Resistance 2W",
+    "Resistance 4W",
+    "Frequency",
+    "Capacitance",
+    "Temperature",
+    "Thermocouple",
+    "RTD",
+    "Pressure",
+    "DC Voltage Source",
+    "AC Voltage Source",
+    "DC Current Source",
+    "AC Current Source",
+    "Resistance Source",
+    "Continuity",
+    "Diode",
+    "Other",
+]
+
+
+def get_all_section_types() -> List[str]:
+    """Get all section types from database (built-in + custom).
+
+    Returns list of section type names sorted alphabetically.
+    Falls back to STANDARD_SECTION_TYPES if database not available.
+    """
+    try:
+        # Import here to avoid circular imports
+        from calsystem.database.connection import get_db
+
+        db = get_db()
+        if not db.is_connected:
+            return STANDARD_SECTION_TYPES.copy()
+
+        with db.session() as session:
+            types = session.query(SectionType.name).order_by(SectionType.name).all()
+            return [t[0] for t in types]
+
+    except Exception:
+        return STANDARD_SECTION_TYPES.copy()
+
+
+# Standard generic command names for command bank
+# Each calibrator's command bank maps these generic names to actual SCPI/GPIB commands
+# Example: "OUTPUT" -> "OUT {value} {unit}" for Fluke, "SOURCE {value}{unit}" for others
+STANDARD_COMMANDS = {
+    # Identity & Control
+    "IDENTITY": {
+        "description": "Query instrument identity",
+        "default": "*IDN?",
+        "required": True,
+    },
+    "RESET": {
+        "description": "Reset instrument to default state",
+        "default": "*RST",
+        "required": True,
+    },
+    "CLEAR": {
+        "description": "Clear status/errors",
+        "default": "*CLS",
+        "required": False,
+    },
+    "OPC": {
+        "description": "Operation complete query",
+        "default": "*OPC?",
+        "required": False,
+    },
+
+    # Output Control
+    "OUTPUT": {
+        "description": "Set output value - use {value}, {unit}, {frequency}, {freq_unit}",
+        "default": "OUT {value} {unit}",
+        "required": True,
+    },
+    "OPERATE": {
+        "description": "Enable output (turn on)",
+        "default": "OPER",
+        "required": True,
+    },
+    "STANDBY": {
+        "description": "Disable output (turn off/safe)",
+        "default": "STBY",
+        "required": True,
+    },
+
+    # AC-specific
+    "OUTPUT_AC": {
+        "description": "Set AC output with frequency - use {value}, {unit}, {frequency}, {freq_unit}",
+        "default": "OUT {value} {unit}, {frequency} {freq_unit}",
+        "required": False,
+    },
+
+    # Measurement (for DMMs)
+    "MEASURE_DCV": {
+        "description": "Measure DC voltage",
+        "default": "DCV AUTO",
+        "required": False,
+    },
+    "MEASURE_ACV": {
+        "description": "Measure AC voltage",
+        "default": "ACV AUTO",
+        "required": False,
+    },
+    "MEASURE_DCI": {
+        "description": "Measure DC current",
+        "default": "DCI AUTO",
+        "required": False,
+    },
+    "MEASURE_ACI": {
+        "description": "Measure AC current",
+        "default": "ACI AUTO",
+        "required": False,
+    },
+    "MEASURE_OHM": {
+        "description": "Measure resistance (2-wire)",
+        "default": "OHM AUTO",
+        "required": False,
+    },
+    "MEASURE_OHM4": {
+        "description": "Measure resistance (4-wire)",
+        "default": "OHMF AUTO",
+        "required": False,
+    },
+    "TRIGGER": {
+        "description": "Trigger a measurement",
+        "default": "TRIG SGL",
+        "required": False,
+    },
+    "READ": {
+        "description": "Read measurement value",
+        "default": "",
+        "required": False,
+    },
+}
 
 
 # =============================================================================
@@ -136,6 +288,7 @@ class WorkstationStandard(Base):
     workstation_id = Column(Integer, ForeignKey("workstation_configs.id"), nullable=False)
     standard_id = Column(Integer, ForeignKey("standards.id"), nullable=False)
     visa_address = Column(String(200), nullable=True, comment="Address on this workstation")
+    is_active = Column(Boolean, default=True, comment="Whether this standard is actively in use")
 
     # Relationships
     workstation = relationship("WorkstationConfig", back_populates="standards")
@@ -229,6 +382,12 @@ class TestSection(Base):
     description = Column(Text, nullable=True)
     order = Column(Integer, default=0)
 
+    # Standard section type for wiring diagram lookup
+    # Links this section to library images by standard name (e.g., "AC Voltage")
+    # User can have custom 'name' (e.g., "AC Volts Test") but this field
+    # determines which library images to use
+    standard_section_type = Column(String(50), nullable=True, comment="Standard type for diagram lookup")
+
     # Relationships
     procedure = relationship("Procedure", back_populates="sections")
     test_points = relationship(
@@ -252,6 +411,31 @@ class TestPoint(Base):
     frequency = Column(Float, nullable=True, comment="For AC measurements")
     frequency_unit = Column(String(10), default="Hz")
 
+    # Pre-conditioning (optional step before actual test)
+    pre_nominal_value = Column(Float, nullable=True, comment="Pre-conditioning value")
+    pre_unit = Column(String(20), nullable=True)
+    pre_frequency = Column(Float, nullable=True)
+    pre_frequency_unit = Column(String(10), default="Hz")
+    pre_delay_seconds = Column(Float, default=0, comment="Delay after pre-conditioning")
+    # Additional pre-conditioning steps (JSON array)
+    # Each step: {"value": 310, "unit": "OHM", "frequency": 0, "frequency_unit": "Hz", "delay": 2}
+    pre_conditioning_steps = Column(JSON, nullable=True, comment="Additional pre-conditioning steps")
+
+    # Pass/Fail prompt (for subjective tests like beeper check)
+    pass_fail_prompt = Column(Text, nullable=True, comment="Prompt shown to tech for Pass/Fail tests")
+    # Pass/Fail range check (for DMM value checks in Pass/Fail tests)
+    pass_fail_min = Column(Float, nullable=True, comment="Minimum value for Pass/Fail range check")
+    pass_fail_max = Column(Float, nullable=True, comment="Maximum value for Pass/Fail range check")
+    pass_fail_range_unit = Column(String(20), nullable=True, comment="Unit for Pass/Fail range check")
+
+    # Measurement target - what are we actually measuring?
+    # PRIMARY = compare reading to nominal_value
+    # FREQUENCY = compare reading to frequency field
+    # CUSTOM = compare reading to expected_value
+    measurement_target = Column(Enum(MeasurementTarget), default=MeasurementTarget.PRIMARY)
+    expected_value = Column(Float, nullable=True, comment="Custom expected value if measurement_target=CUSTOM")
+    expected_unit = Column(String(20), nullable=True, comment="Custom expected unit if measurement_target=CUSTOM")
+
     # Tolerance
     tolerance_value = Column(Float, nullable=True)
     tolerance_type = Column(Enum(ToleranceType), default=ToleranceType.PERCENT)
@@ -270,6 +454,17 @@ class TestPoint(Base):
     excel_sheet = Column(String(100), nullable=True)
     excel_cell = Column(String(20), nullable=True)
 
+    # Test point specific wiring diagram (references WiringDiagramLibrary.section_type)
+    # If set, shows this wiring diagram before the test point (overrides section diagram)
+    wiring_diagram_type = Column(String(100), nullable=True, comment="Library section_type for test point wiring")
+
+    # Operator instructions - prompt shown to technician before executing this test point
+    operator_prompt = Column(Text, nullable=True, comment="Instructions shown to tech before test point")
+
+    # DMM configuration - stored as JSON for flexibility across different DMM models
+    # Structure: {"model": "3458A", "func": "DCV", "range": "AUTO", "nplc": "100", ...}
+    dmm_config = Column(JSON, nullable=True, comment="DMM settings: func, range, nplc, ndig, azero, etc.")
+
     description = Column(Text, nullable=True)
 
     # Relationships
@@ -277,7 +472,7 @@ class TestPoint(Base):
 
 
 class WiringDiagram(Base):
-    """Wiring diagram images for procedures."""
+    """Wiring diagram images for procedures (legacy - per procedure)."""
 
     __tablename__ = "wiring_diagrams"
 
@@ -292,6 +487,90 @@ class WiringDiagram(Base):
 
     # Relationships
     procedure = relationship("Procedure", back_populates="wiring_diagrams")
+
+
+class WiringDiagramLibrary(Base):
+    """Library of wiring diagrams organized by calibrator + DUT + section."""
+
+    __tablename__ = "wiring_diagram_library"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+
+    # Calibrator info (which standard this diagram is for)
+    calibrator_make = Column(String(100), nullable=False)
+    calibrator_model = Column(String(100), nullable=False)
+
+    # DUT info (which device under test this diagram is for)
+    dut_make = Column(String(100), nullable=True)
+    dut_model = Column(String(100), nullable=False)
+
+    # Section/measurement type (e.g., "AC Voltage", "Resistance", "mA Source")
+    section_name = Column(String(100), nullable=False)
+
+    # Image data
+    image_data = Column(LargeBinary, nullable=True)
+    image_path = Column(String(500), nullable=True, comment="Alternative: file path")
+    mime_type = Column(String(50), default="image/png")
+
+    # Auto-generated filename: {calibrator_model}_{dut_model}_{section_name}.png
+    filename = Column(String(300), nullable=True)
+
+    description = Column(Text, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("calibrator_model", "dut_model", "section_name", name="uq_wiring_diagram_combo"),
+        Index("ix_wiring_lib_calibrator", "calibrator_model"),
+        Index("ix_wiring_lib_dut", "dut_model"),
+    )
+
+
+class SectionDiagramLink(Base):
+    """Links a test section to a specific wiring diagram for a specific calibrator.
+
+    This allows each section in a procedure to have different wiring diagrams
+    for different calibrators. During execution, the system looks up the diagram
+    based on section_id + calibrator_model.
+    """
+
+    __tablename__ = "section_diagram_links"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    section_id = Column(Integer, ForeignKey("test_sections.id"), nullable=False)
+    calibrator_model = Column(String(100), nullable=False, comment="e.g., 5550A, 5520A")
+    diagram_id = Column(Integer, ForeignKey("wiring_diagram_library.id"), nullable=False)
+    created_at = Column(DateTime, server_default=func.now())
+
+    # Relationships
+    section = relationship("TestSection")
+    diagram = relationship("WiringDiagramLibrary")
+
+    __table_args__ = (
+        # Each section can only have one diagram per calibrator
+        UniqueConstraint("section_id", "calibrator_model", name="uq_section_calibrator_diagram"),
+        Index("ix_section_diagram_lookup", "section_id", "calibrator_model"),
+    )
+
+
+class SectionType(Base):
+    """Custom section types for wiring diagrams and procedures.
+
+    These are user-defined types that extend STANDARD_SECTION_TYPES.
+    Used for organizing wiring diagrams and test sections.
+    """
+
+    __tablename__ = "section_types"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(100), nullable=False, unique=True)
+    description = Column(Text, nullable=True)
+    is_builtin = Column(Boolean, default=False, comment="True for standard types, False for user-added")
+    created_at = Column(DateTime, server_default=func.now())
+
+    __table_args__ = (
+        Index("ix_section_type_name", "name"),
+    )
 
 
 # =============================================================================
@@ -371,6 +650,7 @@ class CalibrationSession(Base):
 
     # Relationships
     dut = relationship("DUT", back_populates="calibration_sessions")
+    procedure = relationship("Procedure")
     results = relationship("TestResult", back_populates="session")
 
     __table_args__ = (

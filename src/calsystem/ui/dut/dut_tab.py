@@ -863,7 +863,7 @@ class DUTTab(QWidget):
                     self.history_table.setItem(row, 1, QTableWidgetItem(cal_session.work_order or "--"))
 
                     # Technician
-                    self.history_table.setItem(row, 2, QTableWidgetItem(cal_session.technician or "--"))
+                    self.history_table.setItem(row, 2, QTableWidgetItem(cal_session.technician_name or "--"))
 
                     # Result
                     result = (cal_session.overall_result or cal_session.status.value).title()

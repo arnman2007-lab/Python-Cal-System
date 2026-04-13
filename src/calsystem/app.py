@@ -28,7 +28,7 @@ class CalsystemApp(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Calsystem - Calibration Management System")
+        self.setWindowTitle("Calsystem v0.1.0 - Calibration Management System")
         self.setMinimumSize(1200, 800)
 
         # Initialize components
@@ -191,6 +191,7 @@ class CalsystemApp(QMainWindow):
         from calsystem.ui.procedures.procedures_tab import ProceduresTab
         from calsystem.ui.execution.execution_tab import ExecutionTab
         from calsystem.ui.reports.reports_tab import ReportsTab
+        from calsystem.ui.libraries.libraries_tab import LibrariesTab
 
         # Add tabs
         self.workstation_tab = WorkstationTab()
@@ -201,6 +202,9 @@ class CalsystemApp(QMainWindow):
 
         self.procedures_tab = ProceduresTab()
         self.tabs.addTab(self.procedures_tab, "Procedures")
+
+        self.libraries_tab = LibrariesTab()
+        self.tabs.addTab(self.libraries_tab, "Libraries")
 
         self.execution_tab = ExecutionTab()
         self.tabs.addTab(self.execution_tab, "Run Test")

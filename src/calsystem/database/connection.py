@@ -11,7 +11,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from loguru import logger
 
 from calsystem.config.settings import get_settings
-from calsystem.database.models import Base
+from calsystem.database.models import Base, SectionType, STANDARD_SECTION_TYPES
 
 
 class DatabaseManager:
@@ -104,6 +104,235 @@ class DatabaseManager:
 
         Base.metadata.create_all(self._engine)
         logger.info("Database tables created")
+
+        # Run migrations for new columns
+        self._run_migrations()
+
+        # Seed default section types
+        self._seed_section_types()
+
+    def _seed_section_types(self):
+        """Seed default section types if table is empty."""
+        if not self._initialized or not self._session_factory:
+            return
+
+        try:
+            session = self._session_factory()
+            try:
+                # Check if any built-in types exist
+                existing = session.query(SectionType).filter(
+                    SectionType.is_builtin == True
+                ).count()
+
+                if existing == 0:
+                    # Add standard section types
+                    for type_name in STANDARD_SECTION_TYPES:
+                        section_type = SectionType(
+                            name=type_name,
+                            is_builtin=True
+                        )
+                        session.add(section_type)
+                    session.commit()
+                    logger.info(f"Seeded {len(STANDARD_SECTION_TYPES)} default section types")
+            finally:
+                session.close()
+        except Exception as e:
+            logger.warning(f"Failed to seed section types: {e}")
+
+    def _run_migrations(self):
+        """Run any necessary database migrations."""
+        if not self._initialized or not self._engine:
+            return
+
+        try:
+            with self._engine.connect() as conn:
+                if getattr(self, '_is_sqlite', False):
+                    # SQLite migrations
+                    # Check is_active column in workstation_standards
+                    result = conn.execute(text("PRAGMA table_info(workstation_standards)"))
+                    columns = [row[1] for row in result.fetchall()]
+                    if 'is_active' not in columns:
+                        conn.execute(text("ALTER TABLE workstation_standards ADD COLUMN is_active BOOLEAN DEFAULT 1"))
+                        conn.commit()
+                        logger.info("Added is_active column to workstation_standards")
+
+                    # Check standard_section_type column in test_sections
+                    result = conn.execute(text("PRAGMA table_info(test_sections)"))
+                    columns = [row[1] for row in result.fetchall()]
+                    if 'standard_section_type' not in columns:
+                        conn.execute(text("ALTER TABLE test_sections ADD COLUMN standard_section_type VARCHAR(50)"))
+                        conn.commit()
+                        logger.info("Added standard_section_type column to test_sections")
+
+                    # Check measurement_target columns in test_points
+                    result = conn.execute(text("PRAGMA table_info(test_points)"))
+                    columns = [row[1] for row in result.fetchall()]
+                    if 'measurement_target' not in columns:
+                        conn.execute(text("ALTER TABLE test_points ADD COLUMN measurement_target VARCHAR(20) DEFAULT 'PRIMARY'"))
+                        conn.commit()
+                        logger.info("Added measurement_target column to test_points")
+                    else:
+                        # Fix any lowercase values from earlier migration
+                        conn.execute(text("UPDATE test_points SET measurement_target = 'PRIMARY' WHERE measurement_target = 'primary'"))
+                        conn.execute(text("UPDATE test_points SET measurement_target = 'FREQUENCY' WHERE measurement_target = 'frequency'"))
+                        conn.execute(text("UPDATE test_points SET measurement_target = 'CUSTOM' WHERE measurement_target = 'custom'"))
+                        conn.commit()
+                    if 'expected_value' not in columns:
+                        conn.execute(text("ALTER TABLE test_points ADD COLUMN expected_value FLOAT"))
+                        conn.commit()
+                        logger.info("Added expected_value column to test_points")
+                    if 'expected_unit' not in columns:
+                        conn.execute(text("ALTER TABLE test_points ADD COLUMN expected_unit VARCHAR(20)"))
+                        conn.commit()
+                        logger.info("Added expected_unit column to test_points")
+                    if 'wiring_diagram_type' not in columns:
+                        conn.execute(text("ALTER TABLE test_points ADD COLUMN wiring_diagram_type VARCHAR(100)"))
+                        conn.commit()
+                        logger.info("Added wiring_diagram_type column to test_points")
+                    if 'operator_prompt' not in columns:
+                        conn.execute(text("ALTER TABLE test_points ADD COLUMN operator_prompt TEXT"))
+                        conn.commit()
+                        logger.info("Added operator_prompt column to test_points")
+                    if 'dmm_config' not in columns:
+                        conn.execute(text("ALTER TABLE test_points ADD COLUMN dmm_config TEXT"))
+                        conn.commit()
+                        logger.info("Added dmm_config column to test_points")
+                    if 'pass_fail_min' not in columns:
+                        conn.execute(text("ALTER TABLE test_points ADD COLUMN pass_fail_min FLOAT"))
+                        conn.commit()
+                        logger.info("Added pass_fail_min column to test_points")
+                    if 'pass_fail_max' not in columns:
+                        conn.execute(text("ALTER TABLE test_points ADD COLUMN pass_fail_max FLOAT"))
+                        conn.commit()
+                        logger.info("Added pass_fail_max column to test_points")
+                    if 'pass_fail_range_unit' not in columns:
+                        conn.execute(text("ALTER TABLE test_points ADD COLUMN pass_fail_range_unit VARCHAR(20)"))
+                        conn.commit()
+                        logger.info("Added pass_fail_range_unit column to test_points")
+                    if 'pre_conditioning_steps' not in columns:
+                        conn.execute(text("ALTER TABLE test_points ADD COLUMN pre_conditioning_steps TEXT"))
+                        conn.commit()
+                        logger.info("Added pre_conditioning_steps column to test_points")
+                else:
+                    # MySQL migrations
+                    # Check is_active column
+                    result = conn.execute(text(
+                        "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                        "WHERE TABLE_NAME = 'workstation_standards' AND COLUMN_NAME = 'is_active'"
+                    ))
+                    if not result.fetchone():
+                        conn.execute(text("ALTER TABLE workstation_standards ADD COLUMN is_active BOOLEAN DEFAULT TRUE"))
+                        conn.commit()
+                        logger.info("Added is_active column to workstation_standards")
+
+                    # Check standard_section_type column
+                    result = conn.execute(text(
+                        "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                        "WHERE TABLE_NAME = 'test_sections' AND COLUMN_NAME = 'standard_section_type'"
+                    ))
+                    if not result.fetchone():
+                        conn.execute(text("ALTER TABLE test_sections ADD COLUMN standard_section_type VARCHAR(50)"))
+                        conn.commit()
+                        logger.info("Added standard_section_type column to test_sections")
+
+                    # Check measurement_target columns in test_points
+                    result = conn.execute(text(
+                        "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                        "WHERE TABLE_NAME = 'test_points' AND COLUMN_NAME = 'measurement_target'"
+                    ))
+                    if not result.fetchone():
+                        conn.execute(text("ALTER TABLE test_points ADD COLUMN measurement_target VARCHAR(20) DEFAULT 'PRIMARY'"))
+                        conn.commit()
+                        logger.info("Added measurement_target column to test_points")
+                    else:
+                        # Fix any lowercase values from earlier migration
+                        conn.execute(text("UPDATE test_points SET measurement_target = 'PRIMARY' WHERE measurement_target = 'primary'"))
+                        conn.execute(text("UPDATE test_points SET measurement_target = 'FREQUENCY' WHERE measurement_target = 'frequency'"))
+                        conn.execute(text("UPDATE test_points SET measurement_target = 'CUSTOM' WHERE measurement_target = 'custom'"))
+                        conn.commit()
+
+                    result = conn.execute(text(
+                        "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                        "WHERE TABLE_NAME = 'test_points' AND COLUMN_NAME = 'expected_value'"
+                    ))
+                    if not result.fetchone():
+                        conn.execute(text("ALTER TABLE test_points ADD COLUMN expected_value FLOAT"))
+                        conn.commit()
+                        logger.info("Added expected_value column to test_points")
+
+                    result = conn.execute(text(
+                        "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                        "WHERE TABLE_NAME = 'test_points' AND COLUMN_NAME = 'expected_unit'"
+                    ))
+                    if not result.fetchone():
+                        conn.execute(text("ALTER TABLE test_points ADD COLUMN expected_unit VARCHAR(20)"))
+                        conn.commit()
+                        logger.info("Added expected_unit column to test_points")
+
+                    result = conn.execute(text(
+                        "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                        "WHERE TABLE_NAME = 'test_points' AND COLUMN_NAME = 'wiring_diagram_type'"
+                    ))
+                    if not result.fetchone():
+                        conn.execute(text("ALTER TABLE test_points ADD COLUMN wiring_diagram_type VARCHAR(100)"))
+                        conn.commit()
+                        logger.info("Added wiring_diagram_type column to test_points")
+
+                    result = conn.execute(text(
+                        "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                        "WHERE TABLE_NAME = 'test_points' AND COLUMN_NAME = 'operator_prompt'"
+                    ))
+                    if not result.fetchone():
+                        conn.execute(text("ALTER TABLE test_points ADD COLUMN operator_prompt TEXT"))
+                        conn.commit()
+                        logger.info("Added operator_prompt column to test_points")
+
+                    result = conn.execute(text(
+                        "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                        "WHERE TABLE_NAME = 'test_points' AND COLUMN_NAME = 'dmm_config'"
+                    ))
+                    if not result.fetchone():
+                        conn.execute(text("ALTER TABLE test_points ADD COLUMN dmm_config JSON"))
+                        conn.commit()
+                        logger.info("Added dmm_config column to test_points")
+
+                    result = conn.execute(text(
+                        "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                        "WHERE TABLE_NAME = 'test_points' AND COLUMN_NAME = 'pass_fail_min'"
+                    ))
+                    if not result.fetchone():
+                        conn.execute(text("ALTER TABLE test_points ADD COLUMN pass_fail_min FLOAT"))
+                        conn.commit()
+                        logger.info("Added pass_fail_min column to test_points")
+
+                    result = conn.execute(text(
+                        "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                        "WHERE TABLE_NAME = 'test_points' AND COLUMN_NAME = 'pass_fail_max'"
+                    ))
+                    if not result.fetchone():
+                        conn.execute(text("ALTER TABLE test_points ADD COLUMN pass_fail_max FLOAT"))
+                        conn.commit()
+                        logger.info("Added pass_fail_max column to test_points")
+
+                    result = conn.execute(text(
+                        "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                        "WHERE TABLE_NAME = 'test_points' AND COLUMN_NAME = 'pass_fail_range_unit'"
+                    ))
+                    if not result.fetchone():
+                        conn.execute(text("ALTER TABLE test_points ADD COLUMN pass_fail_range_unit VARCHAR(20)"))
+                        conn.commit()
+                        logger.info("Added pass_fail_range_unit column to test_points")
+
+                    result = conn.execute(text(
+                        "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                        "WHERE TABLE_NAME = 'test_points' AND COLUMN_NAME = 'pre_conditioning_steps'"
+                    ))
+                    if not result.fetchone():
+                        conn.execute(text("ALTER TABLE test_points ADD COLUMN pre_conditioning_steps JSON"))
+                        conn.commit()
+                        logger.info("Added pre_conditioning_steps column to test_points")
+        except Exception as e:
+            logger.warning(f"Migration check: {e}")
 
     def test_connection(self) -> tuple[bool, str]:
         """

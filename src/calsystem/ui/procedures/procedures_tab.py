@@ -2,9 +2,12 @@
 Procedure builder tab.
 """
 
-from typing import Optional
+import re
+import time
+from typing import Optional, Dict, Any, List
 
 from PyQt6.QtWidgets import (
+    QApplication,
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
@@ -25,17 +28,337 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QFileDialog,
     QDialog,
+    QDialogButtonBox,
+    QListWidget,
+    QListWidgetItem,
+    QTabWidget,
+    QScrollArea,
 )
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QPixmap, QImage
 from loguru import logger
 
 from calsystem.database.connection import get_db
 from calsystem.database.models import (
     Procedure, TestSection, TestPoint, CommandBank, ToleranceType, WiringDiagram,
-    Standard, WorkstationStandard, WorkstationConfig, DeviceGroupType
+    Standard, WorkstationStandard, WorkstationConfig, DeviceGroupType,
+    WiringDiagramLibrary, SectionDiagramLink, STANDARD_SECTION_TYPES, get_all_section_types
 )
 from calsystem.ui.dialogs.excel_import_dialog import ExcelImportDialog
-from calsystem.instruments.visa_manager import get_visa_manager, PYVISA_AVAILABLE
+from calsystem.ui.dialogs.calibrator_selection_dialog import CalibratorSelectionDialog
+from calsystem.instruments.visa_manager import get_visa_manager, PYVISA_AVAILABLE, InstrumentInfo
+
+
+class SectionEditDialog(QDialog):
+    """Dialog for editing section name and standard type."""
+
+    def __init__(self, name: str = "", standard_type: str = "", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Edit Section")
+        self.setMinimumWidth(400)
+
+        self._name = name
+        self._standard_type = standard_type
+
+        layout = QVBoxLayout(self)
+
+        # Section name (custom display name)
+        form_layout = QFormLayout()
+
+        self.name_input = QLineEdit(name)
+        self.name_input.setPlaceholderText("e.g., AC Volts Test")
+        form_layout.addRow("Display Name:", self.name_input)
+
+        # Standard type dropdown (built-in + custom types)
+        self.type_combo = QComboBox()
+        self.type_combo.addItem("-- Select Standard Type --", "")
+        for section_type in get_all_section_types():
+            self.type_combo.addItem(section_type, section_type)
+
+        # Set current selection if provided
+        if standard_type:
+            idx = self.type_combo.findData(standard_type)
+            if idx >= 0:
+                self.type_combo.setCurrentIndex(idx)
+
+        form_layout.addRow("Standard Type:", self.type_combo)
+
+        layout.addLayout(form_layout)
+
+        # Help text
+        help_label = QLabel(
+            "The Standard Type determines which wiring diagram to show.\n"
+            "Example: Your section might be named 'AC Volts Test' but uses\n"
+            "the 'AC Voltage' standard type for diagram lookup."
+        )
+        help_label.setStyleSheet("color: gray; font-size: 11px;")
+        help_label.setWordWrap(True)
+        layout.addWidget(help_label)
+
+        layout.addSpacing(10)
+
+        # Buttons
+        button_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        button_box.accepted.connect(self._on_accept)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
+
+    def _on_accept(self):
+        name = self.name_input.text().strip()
+        if not name:
+            QMessageBox.warning(self, "Required", "Please enter a section name.")
+            return
+        self._name = name
+        self._standard_type = self.type_combo.currentData() or ""
+        self.accept()
+
+    def get_values(self) -> tuple:
+        """Returns (name, standard_type)."""
+        return self._name, self._standard_type
+
+
+class WiringDiagramSelectionDialog(QDialog):
+    """Dialog for selecting a wiring diagram from the library with calibrator selection."""
+
+    # Common calibrator models for dropdown
+    CALIBRATOR_MODELS = [
+        "Fluke 5500A", "Fluke 5502A", "Fluke 5502E",
+        "Fluke 5520A", "Fluke 5522A", "Fluke 5530A",
+        "Fluke 5540A", "Fluke 5550A", "Fluke 5560A",
+        "Fluke 5700A", "Fluke 5720A", "Fluke 5730A",
+    ]
+
+    def __init__(self, dut_model: str, section_name: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Link Wiring Diagram to Section")
+        self.setMinimumSize(750, 550)
+
+        self._dut_model = dut_model
+        self._section_name = section_name
+        self._selected: Optional[Dict[str, Any]] = None
+        self._selected_calibrator: Optional[str] = None
+        self._diagrams: List[Dict[str, Any]] = []
+
+        self._init_ui()
+        self._populate_calibrator_combo()
+
+    def _init_ui(self):
+        """Initialize the dialog UI."""
+        layout = QVBoxLayout(self)
+
+        # Info header
+        info = QLabel(f"Link wiring diagram for DUT: {self._dut_model}, Section: {self._section_name}")
+        info.setStyleSheet("font-weight: bold;")
+        layout.addWidget(info)
+
+        # Calibrator selection
+        cal_layout = QHBoxLayout()
+        cal_layout.addWidget(QLabel("Which calibrator is this diagram for:"))
+        self.calibrator_combo = QComboBox()
+        self.calibrator_combo.setMinimumWidth(200)
+        self.calibrator_combo.currentTextChanged.connect(self._on_calibrator_changed)
+        cal_layout.addWidget(self.calibrator_combo)
+        cal_layout.addStretch()
+        layout.addLayout(cal_layout)
+
+        help_label = QLabel("This creates a direct link: when using this calibrator + this section, show this diagram.")
+        help_label.setStyleSheet("color: gray; font-size: 11px;")
+        layout.addWidget(help_label)
+
+        layout.addSpacing(10)
+
+        # Main content
+        content_layout = QHBoxLayout()
+
+        # List of diagrams
+        list_widget = QWidget()
+        list_layout = QVBoxLayout(list_widget)
+        list_layout.setContentsMargins(0, 0, 0, 0)
+
+        list_layout.addWidget(QLabel("Available Diagrams (filtered by calibrator):"))
+
+        self.diagram_list = QListWidget()
+        self.diagram_list.itemSelectionChanged.connect(self._on_selection_changed)
+        self.diagram_list.itemDoubleClicked.connect(self._on_double_click)
+        list_layout.addWidget(self.diagram_list)
+
+        content_layout.addWidget(list_widget)
+
+        # Preview
+        preview_widget = QWidget()
+        preview_layout = QVBoxLayout(preview_widget)
+        preview_layout.setContentsMargins(0, 0, 0, 0)
+
+        preview_layout.addWidget(QLabel("Preview:"))
+
+        self.preview_label = QLabel()
+        self.preview_label.setMinimumSize(400, 350)
+        self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.preview_label.setStyleSheet("background-color: #f5f5f5; border: 1px solid #ccc;")
+        self.preview_label.setText("Select a calibrator, then select a diagram")
+        preview_layout.addWidget(self.preview_label)
+
+        content_layout.addWidget(preview_widget)
+
+        layout.addLayout(content_layout)
+
+        # Buttons
+        button_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        button_box.accepted.connect(self._on_accept)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
+
+    def _populate_calibrator_combo(self):
+        """Populate calibrator dropdown with common models."""
+        self.calibrator_combo.clear()
+        self.calibrator_combo.addItem("-- Select Calibrator --")
+
+        # Add common models
+        for model in self.CALIBRATOR_MODELS:
+            self.calibrator_combo.addItem(model)
+
+        # Also check database for any calibrators in the library
+        db = get_db()
+        if db.is_connected:
+            try:
+                with db.session() as session:
+                    existing_models = session.query(WiringDiagramLibrary.calibrator_model).distinct().all()
+                    for (model,) in existing_models:
+                        if model and self.calibrator_combo.findText(model) == -1:
+                            self.calibrator_combo.addItem(model)
+            except Exception as e:
+                logger.error(f"Failed to load calibrator models: {e}")
+
+    def _on_calibrator_changed(self, text: str):
+        """Handle calibrator selection change - reload diagrams."""
+        if text.startswith("--"):
+            self._selected_calibrator = None
+            self.diagram_list.clear()
+            self.diagram_list.addItem("Select a calibrator first")
+            self.preview_label.setText("Select a calibrator, then select a diagram")
+            return
+
+        self._selected_calibrator = text
+        self._load_diagrams()
+
+    def _load_diagrams(self):
+        """Load diagrams matching the selected calibrator and DUT model."""
+        self.diagram_list.clear()
+        self._diagrams = []
+
+        if not self._selected_calibrator:
+            return
+
+        db = get_db()
+        if not db.is_connected:
+            return
+
+        try:
+            # Extract just the model number from calibrator (e.g., "Fluke 5550A" -> "5550A")
+            cal_model = self._selected_calibrator.split()[-1] if self._selected_calibrator else ""
+
+            with db.session() as session:
+                # Find diagrams matching this calibrator model
+                diagrams = session.query(WiringDiagramLibrary).filter(
+                    WiringDiagramLibrary.calibrator_model.ilike(f"%{cal_model}%")
+                ).order_by(
+                    WiringDiagramLibrary.dut_model,
+                    WiringDiagramLibrary.section_name
+                ).all()
+
+                for diag in diagrams:
+                    # Build display text
+                    item_text = f"{diag.dut_model} - {diag.section_name}"
+
+                    # Highlight if DUT and section match
+                    dut_match = self._dut_model.lower() in diag.dut_model.lower()
+                    section_match = self._section_name.lower() in diag.section_name.lower()
+
+                    if dut_match and section_match:
+                        item_text = f"★ {item_text} (recommended)"
+                    elif dut_match:
+                        item_text = f"• {item_text} (DUT matches)"
+
+                    item = QListWidgetItem(item_text)
+                    item.setData(Qt.ItemDataRole.UserRole, len(self._diagrams))
+
+                    self._diagrams.append({
+                        "id": diag.id,
+                        "calibrator_model": diag.calibrator_model,
+                        "dut_model": diag.dut_model,
+                        "section_name": diag.section_name,
+                        "filename": diag.filename,
+                        "image_data": diag.image_data,
+                        "mime_type": diag.mime_type,
+                    })
+
+                    self.diagram_list.addItem(item)
+
+                if not diagrams:
+                    self.diagram_list.addItem(f"No diagrams found for {self._selected_calibrator}")
+                    self.diagram_list.addItem("Add diagrams in the Libraries tab first")
+
+        except Exception as e:
+            logger.error(f"Failed to load wiring diagrams: {e}")
+
+    def _on_selection_changed(self):
+        """Handle list selection change."""
+        current = self.diagram_list.currentItem()
+        if not current:
+            return
+
+        idx = current.data(Qt.ItemDataRole.UserRole)
+        if idx is None or idx >= len(self._diagrams):
+            return
+
+        diag = self._diagrams[idx]
+        self._selected = diag
+
+        # Show preview
+        if diag.get("image_data"):
+            image = QImage()
+            image.loadFromData(diag["image_data"])
+
+            if not image.isNull():
+                pixmap = QPixmap.fromImage(image)
+                scaled = pixmap.scaled(
+                    self.preview_label.size(),
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation
+                )
+                self.preview_label.setPixmap(scaled)
+            else:
+                self.preview_label.setText("Failed to load image")
+        else:
+            self.preview_label.setText("No image data")
+
+    def _on_double_click(self, item):
+        """Handle double-click to select and close."""
+        self._on_selection_changed()
+        if self._selected and self._selected_calibrator:
+            self.accept()
+
+    def _on_accept(self):
+        """Accept the selection."""
+        if not self._selected_calibrator:
+            QMessageBox.warning(self, "No Calibrator", "Please select a calibrator first.")
+            return
+        if not self._selected:
+            QMessageBox.warning(self, "No Diagram", "Please select a wiring diagram.")
+            return
+        self.accept()
+
+    def get_selected(self) -> Optional[Dict[str, Any]]:
+        """Get the selected diagram info including calibrator."""
+        if self._selected and self._selected_calibrator:
+            result = self._selected.copy()
+            result['link_calibrator_model'] = self._selected_calibrator
+            return result
+        return None
 
 
 class ProceduresTab(QWidget):
@@ -44,12 +367,18 @@ class ProceduresTab(QWidget):
     def __init__(self):
         super().__init__()
         self._current_procedure_id: Optional[int] = None
+        # Cached calibrator selection for this session
+        self._selected_calibrator: Optional[Dict[str, Any]] = None
+        self._selected_calibrator_commands: Optional[Dict[str, str]] = None
+        # Cached DMM selection for this session
+        self._selected_dmm: Optional[Dict[str, Any]] = None
         self._init_ui()
 
     def showEvent(self, event):
         """Called when tab becomes visible."""
         super().showEvent(event)
         self._refresh_procedure_list()
+        self._load_wiring_diagram_types()
 
     def _init_ui(self):
         """Initialize the UI."""
@@ -137,6 +466,10 @@ class ProceduresTab(QWidget):
         self.add_testpoint_btn.clicked.connect(self._on_add_testpoint)
         tree_toolbar.addWidget(self.add_testpoint_btn)
 
+        self.edit_section_btn = QPushButton("Edit Section")
+        self.edit_section_btn.clicked.connect(self._on_edit_section)
+        tree_toolbar.addWidget(self.edit_section_btn)
+
         tree_toolbar.addStretch()
 
         self.move_up_btn = QPushButton("Move Up")
@@ -162,14 +495,73 @@ class ProceduresTab(QWidget):
 
         main_splitter.addWidget(structure_group)
 
-        # Right - Test point details
+        # Right - Test point details with tabbed interface
         details_group = QGroupBox("Test Point Details")
-        details_layout = QFormLayout(details_group)
+        details_main_layout = QVBoxLayout(details_group)
 
+        # Test Type at the top (controls which tabs are visible)
+        type_layout = QHBoxLayout()
+        type_layout.addWidget(QLabel("Test Type:"))
         self.test_type_combo = QComboBox()
-        self.test_type_combo.addItems(["Measurement", "Pass/Fail", "Calculated"])
-        details_layout.addRow("Test Type:", self.test_type_combo)
+        self.test_type_combo.addItems(["Measurement", "Pass/Fail", "Calculated", "DMM Measurement", "Calibrator + DMM"])
+        self.test_type_combo.currentIndexChanged.connect(self._on_test_type_changed)
+        type_layout.addWidget(self.test_type_combo)
+        type_layout.addStretch()
+        details_main_layout.addLayout(type_layout)
 
+        # Tab widget for different sections
+        self.details_tabs = QTabWidget()
+        self._create_basic_tab()
+        self._create_calibrator_tab()
+        self._create_dmm_tab()
+        self._create_prompt_tab()
+        self._create_advanced_tab()
+        details_main_layout.addWidget(self.details_tabs)
+
+        # Save button and calibrator controls at bottom
+        bottom_layout = QVBoxLayout()
+        self.save_tp_btn = QPushButton("Save Test Point")
+        self.save_tp_btn.clicked.connect(self._save_current_testpoint)
+        bottom_layout.addWidget(self.save_tp_btn)
+
+        # Test output buttons
+        test_btn_layout = QHBoxLayout()
+        self.test_output_btn = QPushButton("Test Output")
+        self.test_output_btn.setToolTip("Send source command to calibrator to verify it works")
+        self.test_output_btn.clicked.connect(self._on_test_output)
+        test_btn_layout.addWidget(self.test_output_btn)
+
+        self.test_passfail_btn = QPushButton("Test Pass/Fail")
+        self.test_passfail_btn.setToolTip("Test the full Pass/Fail flow with pre-conditioning and dialog")
+        self.test_passfail_btn.clicked.connect(self._on_test_pass_fail)
+        test_btn_layout.addWidget(self.test_passfail_btn)
+
+        self.standby_btn = QPushButton("Standby")
+        self.standby_btn.setToolTip("Put calibrator in standby mode")
+        self.standby_btn.clicked.connect(self._on_standby)
+        test_btn_layout.addWidget(self.standby_btn)
+
+        self.change_cal_btn = QPushButton("Change...")
+        self.change_cal_btn.setToolTip("Change selected calibrator")
+        self.change_cal_btn.clicked.connect(self._on_change_calibrator)
+        test_btn_layout.addWidget(self.change_cal_btn)
+
+        bottom_layout.addLayout(test_btn_layout)
+        details_main_layout.addLayout(bottom_layout)
+
+        main_splitter.addWidget(details_group)
+
+        # Set splitter sizes
+        main_splitter.setSizes([250, 350, 300])
+
+        layout.addWidget(main_splitter)
+
+    def _create_basic_tab(self):
+        """Create the Basic tab - test type, nominal, tolerance, measurement target."""
+        basic_widget = QWidget()
+        basic_layout = QFormLayout(basic_widget)
+
+        # Nominal value and unit
         value_layout = QHBoxLayout()
         self.nominal_input = QDoubleSpinBox()
         self.nominal_input.setRange(-999999999, 999999999)
@@ -178,10 +570,11 @@ class ProceduresTab(QWidget):
 
         self.unit_combo = QComboBox()
         self.unit_combo.setEditable(True)
-        self.unit_combo.addItems(["V", "mV", "A", "mA", "Ohm", "Hz", "kHz", "MHz"])
+        self.unit_combo.addItems(["V", "mV", "µV", "A", "mA", "µA", "Ohm", "kOhm", "MOhm", "Hz", "kHz", "MHz"])
         value_layout.addWidget(self.unit_combo)
-        details_layout.addRow("Nominal:", value_layout)
+        basic_layout.addRow("Nominal:", value_layout)
 
+        # Frequency
         freq_layout = QHBoxLayout()
         self.frequency_input = QDoubleSpinBox()
         self.frequency_input.setRange(0, 999999999)
@@ -191,8 +584,9 @@ class ProceduresTab(QWidget):
         self.freq_unit_combo = QComboBox()
         self.freq_unit_combo.addItems(["Hz", "kHz", "MHz"])
         freq_layout.addWidget(self.freq_unit_combo)
-        details_layout.addRow("Frequency:", freq_layout)
+        basic_layout.addRow("Frequency:", freq_layout)
 
+        # Tolerance
         tol_layout = QHBoxLayout()
         self.tolerance_input = QDoubleSpinBox()
         self.tolerance_input.setRange(0, 999999)
@@ -202,13 +596,115 @@ class ProceduresTab(QWidget):
         self.tolerance_type_combo = QComboBox()
         self.tolerance_type_combo.addItems(["%", "Absolute", "PPM"])
         tol_layout.addWidget(self.tolerance_type_combo)
-        details_layout.addRow("Tolerance:", tol_layout)
+        basic_layout.addRow("Tolerance:", tol_layout)
+
+        # Measurement target
+        basic_layout.addRow(QLabel(""))  # Spacer
+        measure_layout = QHBoxLayout()
+        self.measurement_target_combo = QComboBox()
+        self.measurement_target_combo.addItems(["Primary Value", "Frequency", "Custom"])
+        self.measurement_target_combo.setToolTip(
+            "Primary Value: Compare reading to nominal value\n"
+            "Frequency: Compare reading to frequency field\n"
+            "Custom: Compare reading to custom expected value"
+        )
+        self.measurement_target_combo.currentTextChanged.connect(self._on_measurement_target_changed)
+        measure_layout.addWidget(self.measurement_target_combo)
+
+        # Custom expected value (shown when Custom is selected)
+        self.expected_value_input = QDoubleSpinBox()
+        self.expected_value_input.setRange(-999999999, 999999999)
+        self.expected_value_input.setDecimals(6)
+        self.expected_value_input.setVisible(False)
+        measure_layout.addWidget(self.expected_value_input)
+
+        self.expected_unit_combo = QComboBox()
+        self.expected_unit_combo.setEditable(True)
+        self.expected_unit_combo.addItems(["V", "mV", "µV", "A", "mA", "µA", "Ohm", "kOhm", "MOhm", "Hz", "kHz", "MHz"])
+        self.expected_unit_combo.setVisible(False)
+        measure_layout.addWidget(self.expected_unit_combo)
+
+        basic_layout.addRow("Measure:", measure_layout)
+
+        measure_help = QLabel("What value should the reading be compared to?")
+        measure_help.setStyleSheet("color: gray; font-size: 10px;")
+        basic_layout.addRow("", measure_help)
+
+        self.details_tabs.addTab(basic_widget, "Basic")
+        self._basic_tab_index = self.details_tabs.count() - 1
+
+    def _create_calibrator_tab(self):
+        """Create the Calibrator tab - pre-conditioning, source commands."""
+        cal_widget = QWidget()
+        cal_layout = QFormLayout(cal_widget)
+
+        # Pre-conditioning section
+        pre_label = QLabel("Pre-conditioning (optional):")
+        pre_label.setStyleSheet("font-weight: bold;")
+        cal_layout.addRow(pre_label)
+
+        pre_value_layout = QHBoxLayout()
+        self.pre_nominal_input = QDoubleSpinBox()
+        self.pre_nominal_input.setRange(-999999999, 999999999)
+        self.pre_nominal_input.setDecimals(6)
+        self.pre_nominal_input.setSpecialValueText("")
+        pre_value_layout.addWidget(self.pre_nominal_input)
+
+        self.pre_unit_combo = QComboBox()
+        self.pre_unit_combo.setEditable(True)
+        self.pre_unit_combo.addItems(["V", "mV", "µV", "A", "mA", "µA", "Ohm", "kOhm", "MOhm", "Hz", "kHz", "MHz"])
+        pre_value_layout.addWidget(self.pre_unit_combo)
+        cal_layout.addRow("Pre Value:", pre_value_layout)
+
+        pre_freq_layout = QHBoxLayout()
+        self.pre_frequency_input = QDoubleSpinBox()
+        self.pre_frequency_input.setRange(0, 999999999)
+        self.pre_frequency_input.setDecimals(3)
+        pre_freq_layout.addWidget(self.pre_frequency_input)
+
+        self.pre_freq_unit_combo = QComboBox()
+        self.pre_freq_unit_combo.addItems(["Hz", "kHz", "MHz"])
+        pre_freq_layout.addWidget(self.pre_freq_unit_combo)
+        cal_layout.addRow("Pre Freq:", pre_freq_layout)
+
+        delay_layout = QHBoxLayout()
+        self.pre_delay_input = QDoubleSpinBox()
+        self.pre_delay_input.setRange(0, 60)
+        self.pre_delay_input.setDecimals(1)
+        self.pre_delay_input.setSuffix(" sec")
+        delay_layout.addWidget(self.pre_delay_input)
+        delay_layout.addStretch()
+        cal_layout.addRow("Delay:", delay_layout)
+
+        # Additional pre-conditioning steps
+        cal_layout.addRow(QLabel(""))  # Spacer
+        add_steps_label = QLabel("Additional Pre-conditioning Steps:")
+        add_steps_label.setStyleSheet("font-weight: bold;")
+        cal_layout.addRow(add_steps_label)
+
+        self.pre_steps_table = QTableWidget()
+        self.pre_steps_table.setColumnCount(5)
+        self.pre_steps_table.setHorizontalHeaderLabels(["Value", "Unit", "Frequency", "Freq Unit", "Delay (s)"])
+        self.pre_steps_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.pre_steps_table.setMaximumHeight(120)
+        cal_layout.addRow(self.pre_steps_table)
+
+        pre_steps_btn_layout = QHBoxLayout()
+        self.add_pre_step_btn = QPushButton("Add Step")
+        self.add_pre_step_btn.clicked.connect(self._on_add_pre_step)
+        pre_steps_btn_layout.addWidget(self.add_pre_step_btn)
+        self.remove_pre_step_btn = QPushButton("Remove Step")
+        self.remove_pre_step_btn.clicked.connect(self._on_remove_pre_step)
+        pre_steps_btn_layout.addWidget(self.remove_pre_step_btn)
+        pre_steps_btn_layout.addStretch()
+        cal_layout.addRow("", pre_steps_btn_layout)
 
         # Commands section
-        details_layout.addRow(QLabel(""))  # Spacer
-        details_layout.addRow(QLabel("Commands:"))
+        cal_layout.addRow(QLabel(""))  # Spacer
+        cmd_label = QLabel("Commands:")
+        cmd_label.setStyleSheet("font-weight: bold;")
+        cal_layout.addRow(cmd_label)
 
-        # Command bank template selector
         template_layout = QHBoxLayout()
         self.cmd_template_combo = QComboBox()
         self.cmd_template_combo.addItem("-- Select Template --", None)
@@ -217,72 +713,715 @@ class ProceduresTab(QWidget):
         self.load_templates_btn = QPushButton("Refresh")
         self.load_templates_btn.clicked.connect(self._load_command_templates)
         template_layout.addWidget(self.load_templates_btn)
-        details_layout.addRow("Template:", template_layout)
+        cal_layout.addRow("Template:", template_layout)
 
         self.source_cmd_input = QLineEdit()
         self.source_cmd_input.setPlaceholderText("e.g., OUT {value}{unit}")
-        details_layout.addRow("Source:", self.source_cmd_input)
+        cal_layout.addRow("Source:", self.source_cmd_input)
 
         self.operate_cmd_input = QLineEdit()
         self.operate_cmd_input.setPlaceholderText("e.g., OPER")
-        details_layout.addRow("Operate:", self.operate_cmd_input)
+        cal_layout.addRow("Operate:", self.operate_cmd_input)
 
         self.measure_cmd_input = QLineEdit()
         self.measure_cmd_input.setPlaceholderText("e.g., MEAS:VOLT:DC?")
-        details_layout.addRow("Measure:", self.measure_cmd_input)
+        cal_layout.addRow("Measure:", self.measure_cmd_input)
 
-        # Placeholder help text
-        placeholder_help = QLabel("Use {value}, {unit}, {frequency} as placeholders")
+        placeholder_help = QLabel("Placeholders: {value}, {unit}, {frequency}, {freq_unit}, {freq_hz}")
         placeholder_help.setStyleSheet("color: gray; font-size: 10px;")
-        details_layout.addRow("", placeholder_help)
+        cal_layout.addRow("", placeholder_help)
+
+        self.details_tabs.addTab(cal_widget, "Calibrator")
+        self._calibrator_tab_index = self.details_tabs.count() - 1
+
+    # DMM Range options by function
+    DMM_RANGES = {
+        "DCV": ["AUTO", "0.1", "1", "10", "100", "1000"],
+        "ACV": ["AUTO", "0.1", "1", "10", "100", "1000"],
+        "OHM": ["AUTO", "10", "100", "1K", "10K", "100K", "1M", "10M", "100M", "1G"],
+        "OHMF": ["AUTO", "10", "100", "1K", "10K", "100K", "1M", "10M", "100M", "1G"],
+        "DCI": ["AUTO", "100uA", "1mA", "10mA", "100mA", "1A"],
+        "ACI": ["AUTO", "100uA", "1mA", "10mA", "100mA", "1A"],
+        "FREQ": ["AUTO"],
+        "PER": ["AUTO"],
+    }
+
+    # Available optional DMM settings with their value options
+    DMM_OPTIONAL_SETTINGS = {
+        "NPLC": {
+            "description": "Number of Power Line Cycles (integration time)",
+            "values": ["0.0001", "0.001", "0.01", "0.1", "1", "10", "100"],
+            "default": "10"
+        },
+        "NDIG": {
+            "description": "Number of digits (resolution)",
+            "values": ["4", "5", "6", "7", "8"],
+            "default": "7"
+        },
+        "AZERO": {
+            "description": "Auto-zero mode",
+            "values": ["ON", "OFF", "ONCE"],
+            "default": "ON"
+        },
+        "SETACV": {
+            "description": "AC voltage settling (ANA=Analog, SYNC=Synchronous, RNDM=Random)",
+            "values": ["ANA", "SYNC", "RNDM"],
+            "default": "ANA"
+        },
+        "LFILTER": {
+            "description": "Analog low-pass filter",
+            "values": ["OFF", "ON"],
+            "default": "OFF"
+        },
+        "OFORMAT": {
+            "description": "Output format",
+            "values": ["ASCII", "SINT", "DINT", "SREAL", "DREAL"],
+            "default": "ASCII"
+        },
+        "TARM": {
+            "description": "Trigger arm event",
+            "values": ["AUTO", "EXT", "SGL", "HOLD", "SYN"],
+            "default": "AUTO"
+        },
+        "TRIG": {
+            "description": "Trigger event",
+            "values": ["AUTO", "EXT", "SGL", "HOLD", "SYN", "LEVEL", "LINE"],
+            "default": "AUTO"
+        },
+        "NRDGS": {
+            "description": "Number of readings per trigger",
+            "values": ["1", "2", "5", "10", "20", "50", "100"],
+            "default": "1"
+        },
+    }
+
+    def _create_dmm_tab(self):
+        """Create the DMM tab - DMM measurement configuration."""
+        dmm_widget = QWidget()
+        dmm_layout = QVBoxLayout(dmm_widget)
+
+        # Info label
+        info_label = QLabel("DMM from workstation will be used at execution time.")
+        info_label.setStyleSheet("color: gray; font-style: italic;")
+        dmm_layout.addWidget(info_label)
+
+        # === Core Settings Section ===
+        core_group = QGroupBox("Core Settings")
+        core_layout = QFormLayout(core_group)
+
+        # Function
+        self.dmm_func_combo = QComboBox()
+        self.dmm_func_combo.addItems(["DCV", "ACV", "OHM", "OHMF", "DCI", "ACI", "FREQ", "PER"])
+        self.dmm_func_combo.setToolTip("Measurement function")
+        self.dmm_func_combo.currentTextChanged.connect(self._on_dmm_func_changed)
+        core_layout.addRow("Function:", self.dmm_func_combo)
+
+        # Range (updates based on function)
+        self.dmm_range_combo = QComboBox()
+        self.dmm_range_combo.addItems(self.DMM_RANGES["DCV"])
+        self.dmm_range_combo.setToolTip("Measurement range (AUTO or specific)")
+        core_layout.addRow("Range:", self.dmm_range_combo)
+
+        # Delay
+        delay_layout = QHBoxLayout()
+        self.dmm_delay_input = QDoubleSpinBox()
+        self.dmm_delay_input.setRange(0, 9999)
+        self.dmm_delay_input.setDecimals(3)
+        self.dmm_delay_input.setSuffix(" sec")
+        self.dmm_delay_input.setToolTip("Trigger delay before measurement")
+        delay_layout.addWidget(self.dmm_delay_input)
+        delay_layout.addStretch()
+        core_layout.addRow("Delay:", delay_layout)
+
+        # Reading format (decimal places)
+        self.dmm_reading_format_combo = QComboBox()
+        self.dmm_reading_format_combo.addItems([
+            "Match Test Point",
+            "0.0 (1 decimal)",
+            "0.00 (2 decimals)",
+            "0.000 (3 decimals)",
+            "0.0000 (4 decimals)",
+            "0.00000 (5 decimals)",
+            "0.000000 (6 decimals)",
+        ])
+        self.dmm_reading_format_combo.setToolTip("How to format the reading display")
+        core_layout.addRow("Reading Format:", self.dmm_reading_format_combo)
+
+        dmm_layout.addWidget(core_group)
+
+        # === Optional Settings Section ===
+        optional_group = QGroupBox("Optional Settings")
+        optional_layout = QVBoxLayout(optional_group)
+
+        optional_help = QLabel("Add only the settings you need. Commands sent in correct order.")
+        optional_help.setStyleSheet("color: gray; font-size: 10px;")
+        optional_layout.addWidget(optional_help)
+
+        # Optional settings table
+        self.dmm_optional_table = QTableWidget()
+        self.dmm_optional_table.setColumnCount(3)
+        self.dmm_optional_table.setHorizontalHeaderLabels(["Setting", "Value", ""])
+        self.dmm_optional_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.dmm_optional_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.dmm_optional_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        self.dmm_optional_table.setColumnWidth(2, 60)
+        self.dmm_optional_table.setMaximumHeight(150)
+        optional_layout.addWidget(self.dmm_optional_table)
+
+        # Add Setting button
+        add_setting_layout = QHBoxLayout()
+        self.dmm_add_setting_btn = QPushButton("Add Setting...")
+        self.dmm_add_setting_btn.clicked.connect(self._on_add_dmm_setting)
+        add_setting_layout.addWidget(self.dmm_add_setting_btn)
+        add_setting_layout.addStretch()
+        optional_layout.addLayout(add_setting_layout)
+
+        dmm_layout.addWidget(optional_group)
+
+        # === Custom Commands Section ===
+        custom_group = QGroupBox("Custom Commands")
+        custom_layout = QVBoxLayout(custom_group)
+
+        custom_help = QLabel("Raw SCPI commands (sent after settings above)")
+        custom_help.setStyleSheet("color: gray; font-size: 10px;")
+        custom_layout.addWidget(custom_help)
+
+        # Commands table with Order column
+        self.dmm_commands_table = QTableWidget()
+        self.dmm_commands_table.setColumnCount(3)
+        self.dmm_commands_table.setHorizontalHeaderLabels(["Name", "Command", "Order"])
+        self.dmm_commands_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.dmm_commands_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.dmm_commands_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        self.dmm_commands_table.setColumnWidth(2, 80)
+        self.dmm_commands_table.setMaximumHeight(100)
+        custom_layout.addWidget(self.dmm_commands_table)
+
+        # Add/Remove buttons
+        cmd_btn_layout = QHBoxLayout()
+        self.dmm_add_cmd_btn = QPushButton("Add")
+        self.dmm_add_cmd_btn.clicked.connect(self._on_add_dmm_command)
+        cmd_btn_layout.addWidget(self.dmm_add_cmd_btn)
+
+        self.dmm_remove_cmd_btn = QPushButton("Remove")
+        self.dmm_remove_cmd_btn.clicked.connect(self._on_remove_dmm_command)
+        cmd_btn_layout.addWidget(self.dmm_remove_cmd_btn)
+
+        cmd_btn_layout.addStretch()
+        custom_layout.addLayout(cmd_btn_layout)
+
+        dmm_layout.addWidget(custom_group)
+
+        # === Test Section ===
+        test_layout = QHBoxLayout()
+        self.test_dmm_btn = QPushButton("Test Reading")
+        self.test_dmm_btn.setToolTip("Send settings to DMM and take a test reading")
+        self.test_dmm_btn.clicked.connect(self._on_test_dmm_reading)
+        test_layout.addWidget(self.test_dmm_btn)
+        test_layout.addStretch()
+        dmm_layout.addLayout(test_layout)
+
+        dmm_layout.addStretch()
+
+        self.details_tabs.addTab(dmm_widget, "DMM")
+        self._dmm_tab_index = self.details_tabs.count() - 1
+
+    def _on_dmm_func_changed(self, func: str):
+        """Update range options based on selected DMM function."""
+        self.dmm_range_combo.clear()
+        ranges = self.DMM_RANGES.get(func, ["AUTO"])
+        self.dmm_range_combo.addItems(ranges)
+
+    def _on_add_dmm_setting(self):
+        """Add an optional DMM setting."""
+        # Get list of settings not already added
+        existing_settings = set()
+        for row in range(self.dmm_optional_table.rowCount()):
+            label_item = self.dmm_optional_table.item(row, 0)
+            if label_item:
+                existing_settings.add(label_item.text())
+
+        available = [s for s in self.DMM_OPTIONAL_SETTINGS.keys() if s not in existing_settings]
+
+        if not available:
+            QMessageBox.information(self, "No Settings Available", "All optional settings have been added.")
+            return
+
+        # Show selection dialog
+        from PyQt6.QtWidgets import QInputDialog
+        item, ok = QInputDialog.getItem(
+            self, "Add DMM Setting",
+            "Select setting to add:",
+            available, 0, False
+        )
+
+        if ok and item:
+            self._add_dmm_setting_row(item)
+
+    def _add_dmm_setting_row(self, setting_name: str, value: str = None):
+        """Add a row to the optional settings table."""
+        if setting_name not in self.DMM_OPTIONAL_SETTINGS:
+            return
+
+        setting_info = self.DMM_OPTIONAL_SETTINGS[setting_name]
+        row = self.dmm_optional_table.rowCount()
+        self.dmm_optional_table.insertRow(row)
+
+        # Setting name (read-only)
+        name_item = QTableWidgetItem(setting_name)
+        name_item.setFlags(name_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+        name_item.setToolTip(setting_info["description"])
+        self.dmm_optional_table.setItem(row, 0, name_item)
+
+        # Value dropdown
+        value_combo = QComboBox()
+        value_combo.addItems(setting_info["values"])
+        if value and value in setting_info["values"]:
+            value_combo.setCurrentText(value)
+        else:
+            value_combo.setCurrentText(setting_info["default"])
+        self.dmm_optional_table.setCellWidget(row, 1, value_combo)
+
+        # Remove button
+        remove_btn = QPushButton("Remove")
+        remove_btn.clicked.connect(lambda: self._remove_dmm_setting_row(setting_name))
+        self.dmm_optional_table.setCellWidget(row, 2, remove_btn)
+
+    def _remove_dmm_setting_row(self, setting_name: str):
+        """Remove a row from the optional settings table."""
+        for row in range(self.dmm_optional_table.rowCount()):
+            item = self.dmm_optional_table.item(row, 0)
+            if item and item.text() == setting_name:
+                self.dmm_optional_table.removeRow(row)
+                break
+
+    def _on_add_dmm_command(self):
+        """Add a new row to the custom DMM commands table."""
+        row = self.dmm_commands_table.rowCount()
+        self.dmm_commands_table.insertRow(row)
+        self.dmm_commands_table.setItem(row, 0, QTableWidgetItem(""))
+        self.dmm_commands_table.setItem(row, 1, QTableWidgetItem(""))
+
+        # Order dropdown - Before sends before FUNC/RANGE, After sends after
+        order_combo = QComboBox()
+        order_combo.addItems(["Before", "After"])
+        order_combo.setToolTip("Before: sent before FUNC/RANGE (e.g., RESET, END ALWAYS)\nAfter: sent after FUNC/RANGE")
+        self.dmm_commands_table.setCellWidget(row, 2, order_combo)
+
+        self.dmm_commands_table.editItem(self.dmm_commands_table.item(row, 0))
+
+    def _on_remove_dmm_command(self):
+        """Remove selected row from custom DMM commands table."""
+        current_row = self.dmm_commands_table.currentRow()
+        if current_row >= 0:
+            self.dmm_commands_table.removeRow(current_row)
+
+    def _on_add_pre_step(self):
+        """Add a new pre-conditioning step row."""
+        row = self.pre_steps_table.rowCount()
+        self.pre_steps_table.insertRow(row)
+
+        # Value
+        value_item = QTableWidgetItem("0")
+        self.pre_steps_table.setItem(row, 0, value_item)
+
+        # Unit combo
+        unit_combo = QComboBox()
+        unit_combo.setEditable(True)
+        unit_combo.addItems(["V", "mV", "µV", "A", "mA", "µA", "Ohm", "kOhm", "MOhm", "Hz", "kHz", "MHz"])
+        self.pre_steps_table.setCellWidget(row, 1, unit_combo)
+
+        # Frequency
+        freq_item = QTableWidgetItem("0")
+        self.pre_steps_table.setItem(row, 2, freq_item)
+
+        # Freq Unit combo
+        freq_unit_combo = QComboBox()
+        freq_unit_combo.addItems(["Hz", "kHz", "MHz"])
+        self.pre_steps_table.setCellWidget(row, 3, freq_unit_combo)
+
+        # Delay
+        delay_item = QTableWidgetItem("0")
+        self.pre_steps_table.setItem(row, 4, delay_item)
+
+        self.pre_steps_table.editItem(value_item)
+
+    def _on_remove_pre_step(self):
+        """Remove selected pre-conditioning step."""
+        current_row = self.pre_steps_table.currentRow()
+        if current_row >= 0:
+            self.pre_steps_table.removeRow(current_row)
+
+    def _load_pre_steps(self, steps: list):
+        """Load pre-conditioning steps into the table."""
+        self.pre_steps_table.setRowCount(0)
+        if not steps:
+            return
+
+        for step in steps:
+            row = self.pre_steps_table.rowCount()
+            self.pre_steps_table.insertRow(row)
+
+            # Value
+            self.pre_steps_table.setItem(row, 0, QTableWidgetItem(str(step.get('value', 0))))
+
+            # Unit combo
+            unit_combo = QComboBox()
+            unit_combo.setEditable(True)
+            unit_combo.addItems(["V", "mV", "µV", "A", "mA", "µA", "Ohm", "kOhm", "MOhm", "Hz", "kHz", "MHz"])
+            unit_combo.setCurrentText(step.get('unit', 'V'))
+            self.pre_steps_table.setCellWidget(row, 1, unit_combo)
+
+            # Frequency
+            self.pre_steps_table.setItem(row, 2, QTableWidgetItem(str(step.get('frequency', 0))))
+
+            # Freq Unit combo
+            freq_unit_combo = QComboBox()
+            freq_unit_combo.addItems(["Hz", "kHz", "MHz"])
+            freq_unit_combo.setCurrentText(step.get('frequency_unit', 'Hz'))
+            self.pre_steps_table.setCellWidget(row, 3, freq_unit_combo)
+
+            # Delay
+            self.pre_steps_table.setItem(row, 4, QTableWidgetItem(str(step.get('delay', 0))))
+
+    def _save_pre_steps(self) -> list:
+        """Save pre-conditioning steps from the table."""
+        steps = []
+        for row in range(self.pre_steps_table.rowCount()):
+            value_item = self.pre_steps_table.item(row, 0)
+            unit_combo = self.pre_steps_table.cellWidget(row, 1)
+            freq_item = self.pre_steps_table.item(row, 2)
+            freq_unit_combo = self.pre_steps_table.cellWidget(row, 3)
+            delay_item = self.pre_steps_table.item(row, 4)
+
+            try:
+                value = float(value_item.text()) if value_item else 0
+            except ValueError:
+                value = 0
+
+            try:
+                frequency = float(freq_item.text()) if freq_item else 0
+            except ValueError:
+                frequency = 0
+
+            try:
+                delay = float(delay_item.text()) if delay_item else 0
+            except ValueError:
+                delay = 0
+
+            # Only include if value is non-zero
+            if value != 0:
+                steps.append({
+                    'value': value,
+                    'unit': unit_combo.currentText() if unit_combo else 'V',
+                    'frequency': frequency,
+                    'frequency_unit': freq_unit_combo.currentText() if freq_unit_combo else 'Hz',
+                    'delay': delay
+                })
+        return steps
+
+    def _load_dmm_config(self, config: dict):
+        """Load DMM configuration dict into form widgets."""
+        # Clear existing optional settings
+        self.dmm_optional_table.setRowCount(0)
+        self.dmm_commands_table.setRowCount(0)
+
+        if not config:
+            # Set defaults for core settings only
+            self.dmm_func_combo.setCurrentText("DCV")
+            self._on_dmm_func_changed("DCV")
+            self.dmm_range_combo.setCurrentText("AUTO")
+            self.dmm_delay_input.setValue(0)
+            return
+
+        # Core settings
+        func = config.get("func", "DCV")
+        self.dmm_func_combo.setCurrentText(func)
+        self._on_dmm_func_changed(func)
+
+        range_val = config.get("range", "AUTO")
+        idx = self.dmm_range_combo.findText(range_val)
+        if idx >= 0:
+            self.dmm_range_combo.setCurrentIndex(idx)
+        else:
+            self.dmm_range_combo.setCurrentText(range_val)
+
+        self.dmm_delay_input.setValue(float(config.get("delay", 0)))
+
+        # Reading format
+        reading_format = config.get("reading_format", "Match Test Point")
+        idx = self.dmm_reading_format_combo.findText(reading_format, Qt.MatchFlag.MatchStartsWith)
+        if idx >= 0:
+            self.dmm_reading_format_combo.setCurrentIndex(idx)
+        else:
+            self.dmm_reading_format_combo.setCurrentIndex(0)  # Default to "Match Test Point"
+
+        # Optional settings - new format
+        optional_settings = config.get("optional_settings", [])
+        for setting_item in optional_settings:
+            setting_name = setting_item.get("setting", "")
+            setting_value = setting_item.get("value", "")
+            if setting_name in self.DMM_OPTIONAL_SETTINGS:
+                self._add_dmm_setting_row(setting_name, setting_value)
+
+        # Backwards compatibility: migrate old flat format to optional settings
+        old_settings_map = {
+            "nplc": "NPLC",
+            "ndig": "NDIG",
+            "azero": "AZERO",
+            "setacv": "SETACV",
+            "lfilter": "LFILTER",
+        }
+        for old_key, new_name in old_settings_map.items():
+            if old_key in config and "optional_settings" not in config:
+                # Only migrate if this is an old-format config
+                self._add_dmm_setting_row(new_name, config[old_key])
+
+        # Custom commands
+        custom_commands = config.get("custom_commands", [])
+        for cmd_item in custom_commands:
+            row = self.dmm_commands_table.rowCount()
+            self.dmm_commands_table.insertRow(row)
+            self.dmm_commands_table.setItem(row, 0, QTableWidgetItem(cmd_item.get("name", "")))
+            self.dmm_commands_table.setItem(row, 1, QTableWidgetItem(cmd_item.get("command", "")))
+
+            # Order dropdown
+            order_combo = QComboBox()
+            order_combo.addItems(["Before", "After"])
+            order_combo.setToolTip("Before: sent before FUNC/RANGE\nAfter: sent after FUNC/RANGE")
+            order = cmd_item.get("order", "After")
+            order_combo.setCurrentText(order)
+            self.dmm_commands_table.setCellWidget(row, 2, order_combo)
+
+    def _save_dmm_config(self) -> dict:
+        """Collect DMM settings into config dict for saving."""
+        # Collect optional settings
+        optional_settings = []
+        for row in range(self.dmm_optional_table.rowCount()):
+            name_item = self.dmm_optional_table.item(row, 0)
+            value_widget = self.dmm_optional_table.cellWidget(row, 1)
+            if name_item and value_widget and isinstance(value_widget, QComboBox):
+                setting_name = name_item.text()
+                setting_value = value_widget.currentText()
+                optional_settings.append({"setting": setting_name, "value": setting_value})
+
+        # Collect custom commands
+        custom_commands = []
+        for row in range(self.dmm_commands_table.rowCount()):
+            name_item = self.dmm_commands_table.item(row, 0)
+            cmd_item = self.dmm_commands_table.item(row, 1)
+            order_widget = self.dmm_commands_table.cellWidget(row, 2)
+            if name_item and cmd_item:
+                name = name_item.text().strip()
+                cmd = cmd_item.text().strip()
+                order = "After"
+                if order_widget and isinstance(order_widget, QComboBox):
+                    order = order_widget.currentText()
+                if name or cmd:
+                    custom_commands.append({"name": name, "command": cmd, "order": order})
+
+        config = {
+            "func": self.dmm_func_combo.currentText(),
+            "range": self.dmm_range_combo.currentText(),
+            "delay": str(self.dmm_delay_input.value()),
+            "reading_format": self.dmm_reading_format_combo.currentText(),
+            "optional_settings": optional_settings,
+            "custom_commands": custom_commands,
+        }
+
+        return config
+
+    def _clear_dmm_config(self):
+        """Clear DMM configuration form fields."""
+        self.dmm_func_combo.setCurrentText("DCV")
+        self._on_dmm_func_changed("DCV")
+        self.dmm_range_combo.setCurrentText("AUTO")
+        self.dmm_delay_input.setValue(0)
+        self.dmm_reading_format_combo.setCurrentIndex(0)  # "Match Test Point"
+        self.dmm_optional_table.setRowCount(0)
+        self.dmm_commands_table.setRowCount(0)
+
+    def _create_prompt_tab(self):
+        """Create the Prompt tab for Pass/Fail tests."""
+        prompt_widget = QWidget()
+        prompt_layout = QVBoxLayout(prompt_widget)
+
+        # Operational Check section - describes WHAT is being tested
+        check_group = QGroupBox("Operational Check")
+        check_layout = QFormLayout(check_group)
+
+        check_help = QLabel("Describes what is being tested (shown in test point list)")
+        check_help.setStyleSheet("color: gray; font-size: 10px;")
+        check_layout.addRow(check_help)
+
+        self.operational_check_input = QLineEdit()
+        self.operational_check_input.setPlaceholderText(
+            "e.g., 'Open Circuit Voltage', 'Loop Power', 'Beeper Test'"
+        )
+        check_layout.addRow("Check Name:", self.operational_check_input)
+
+        prompt_layout.addWidget(check_group)
+
+        # Technician Prompt section - the question asked to the tech
+        prompt_group = QGroupBox("Technician Prompt")
+        prompt_grp_layout = QFormLayout(prompt_group)
+
+        prompt_help = QLabel("The question shown to the technician during execution")
+        prompt_help.setStyleSheet("color: gray; font-size: 10px;")
+        prompt_grp_layout.addRow(prompt_help)
+
+        self.pass_fail_prompt_input = QTextEdit()
+        self.pass_fail_prompt_input.setMaximumHeight(80)
+        self.pass_fail_prompt_input.setPlaceholderText(
+            "Enter the question for the technician...\n"
+            "e.g., 'Does the display show 24-26V?'\n"
+            "e.g., 'Can you hear the beeper?'"
+        )
+        prompt_grp_layout.addRow("Prompt:", self.pass_fail_prompt_input)
+
+        prompt_layout.addWidget(prompt_group)
+
+        # Range check section (for DMM value checks)
+        range_group = QGroupBox("Range Check (Optional)")
+        range_layout = QFormLayout(range_group)
+
+        range_help = QLabel("If using DMM, check if reading falls within min/max range")
+        range_help.setStyleSheet("color: gray; font-size: 10px;")
+        range_layout.addRow(range_help)
+
+        # Min value
+        min_layout = QHBoxLayout()
+        self.pass_fail_min_input = QDoubleSpinBox()
+        self.pass_fail_min_input.setRange(-999999, 999999)
+        self.pass_fail_min_input.setDecimals(6)
+        self.pass_fail_min_input.setSpecialValueText("No minimum")
+        self.pass_fail_min_input.setValue(self.pass_fail_min_input.minimum())
+        min_layout.addWidget(self.pass_fail_min_input)
+        min_layout.addStretch()
+        range_layout.addRow("Min Value:", min_layout)
+
+        # Max value
+        max_layout = QHBoxLayout()
+        self.pass_fail_max_input = QDoubleSpinBox()
+        self.pass_fail_max_input.setRange(-999999, 999999)
+        self.pass_fail_max_input.setDecimals(6)
+        self.pass_fail_max_input.setSpecialValueText("No maximum")
+        self.pass_fail_max_input.setValue(self.pass_fail_max_input.minimum())
+        max_layout.addWidget(self.pass_fail_max_input)
+        max_layout.addStretch()
+        range_layout.addRow("Max Value:", max_layout)
+
+        # Unit for range
+        self.pass_fail_range_unit = QComboBox()
+        self.pass_fail_range_unit.addItems(["V", "mV", "uV", "A", "mA", "uA", "Ohm", "kOhm", "MOhm", "Hz", "kHz", "MHz"])
+        range_layout.addRow("Unit:", self.pass_fail_range_unit)
+
+        range_example = QLabel("Example: Min=4.9, Max=5.1, Unit=V → Pass if reading is 4.9V to 5.1V")
+        range_example.setStyleSheet("color: gray; font-size: 10px;")
+        range_layout.addRow(range_example)
+
+        prompt_layout.addWidget(range_group)
+
+        # Preview button
+        preview_layout = QHBoxLayout()
+        self.preview_passfail_btn = QPushButton("Preview Pass/Fail Dialog")
+        self.preview_passfail_btn.setToolTip("See how the Pass/Fail dialog will look to the technician")
+        self.preview_passfail_btn.clicked.connect(self._on_preview_passfail)
+        preview_layout.addWidget(self.preview_passfail_btn)
+        preview_layout.addStretch()
+        prompt_layout.addLayout(preview_layout)
+
+        prompt_layout.addStretch()
+
+        self.details_tabs.addTab(prompt_widget, "Prompt")
+        self._prompt_tab_index = self.details_tabs.count() - 1
+
+    def _create_advanced_tab(self):
+        """Create the Advanced tab - formula, excel, wiring."""
+        adv_widget = QWidget()
+        adv_layout = QFormLayout(adv_widget)
+
+        # Formula (for calculated test points)
+        formula_label = QLabel("Calculated Test Point:")
+        formula_label.setStyleSheet("font-weight: bold;")
+        adv_layout.addRow(formula_label)
+
+        self.formula_input = QLineEdit()
+        self.formula_input.setPlaceholderText("e.g., (TP1 + TP2) / 2")
+        adv_layout.addRow("Formula:", self.formula_input)
+
+        formula_help = QLabel("Reference other test points by ID (e.g., TP1, TP2)")
+        formula_help.setStyleSheet("color: gray; font-size: 10px;")
+        adv_layout.addRow("", formula_help)
 
         # Excel mapping
-        details_layout.addRow(QLabel(""))  # Spacer
-        details_layout.addRow(QLabel("Excel Export Mapping:"))
+        adv_layout.addRow(QLabel(""))  # Spacer
+        excel_label = QLabel("Excel Export Mapping:")
+        excel_label.setStyleSheet("font-weight: bold;")
+        adv_layout.addRow(excel_label)
 
         self.excel_sheet_input = QLineEdit()
-        details_layout.addRow("Sheet:", self.excel_sheet_input)
+        adv_layout.addRow("Sheet:", self.excel_sheet_input)
 
         self.excel_cell_input = QLineEdit()
         self.excel_cell_input.setPlaceholderText("e.g., B15")
-        details_layout.addRow("Cell:", self.excel_cell_input)
+        adv_layout.addRow("Cell:", self.excel_cell_input)
 
-        # Wiring diagram
-        details_layout.addRow(QLabel(""))  # Spacer
+        # Operator Instructions
+        adv_layout.addRow(QLabel(""))  # Spacer
+        instructions_label = QLabel("Operator Instructions:")
+        instructions_label.setStyleSheet("font-weight: bold;")
+        adv_layout.addRow(instructions_label)
+
+        self.operator_prompt_edit = QTextEdit()
+        self.operator_prompt_edit.setMaximumHeight(60)
+        self.operator_prompt_edit.setPlaceholderText(
+            "Instructions for technician (shown before test point)"
+        )
+        adv_layout.addRow("Prompt:", self.operator_prompt_edit)
 
         wiring_layout = QHBoxLayout()
-        self.wiring_btn = QPushButton("Add Wiring Diagram...")
-        self.wiring_btn.clicked.connect(self._on_add_wiring)
-        wiring_layout.addWidget(self.wiring_btn)
+        self.wiring_combo = QComboBox()
+        self.wiring_combo.setMinimumWidth(150)
+        self.wiring_combo.setToolTip("Optional wiring diagram from library")
+        wiring_layout.addWidget(self.wiring_combo)
+
+        self.refresh_wiring_btn = QPushButton("Refresh")
+        self.refresh_wiring_btn.clicked.connect(self._load_wiring_diagram_types)
+        self.refresh_wiring_btn.setMaximumWidth(70)
+        wiring_layout.addWidget(self.refresh_wiring_btn)
         wiring_layout.addStretch()
-        details_layout.addRow("Wiring:", wiring_layout)
+        adv_layout.addRow("Wiring:", wiring_layout)
 
-        # Save test point button
-        details_layout.addRow(QLabel(""))  # Spacer
-        self.save_tp_btn = QPushButton("Save Test Point")
-        self.save_tp_btn.clicked.connect(self._save_current_testpoint)
-        details_layout.addRow("", self.save_tp_btn)
+        self.details_tabs.addTab(adv_widget, "Advanced")
 
-        # Test output button - sends commands to calibrator
-        test_btn_layout = QHBoxLayout()
-        self.test_output_btn = QPushButton("Test Output")
-        self.test_output_btn.setToolTip("Send source command to calibrator to verify it works")
-        self.test_output_btn.clicked.connect(self._on_test_output)
-        test_btn_layout.addWidget(self.test_output_btn)
+    def _on_test_type_changed(self, index: int):
+        """Show/hide tabs based on selected test type."""
+        # Tab visibility matrix:
+        # MEASUREMENT (0):      Basic, Calibrator, Advanced
+        # PASS_FAIL (1):        Calibrator, DMM, Prompt, Advanced
+        # CALCULATED (2):       Basic, Advanced
+        # DMM_MEASUREMENT (3):  Basic, DMM, Advanced
+        # CALIBRATOR_DMM (4):   Basic, Calibrator, DMM, Advanced
 
-        self.standby_btn = QPushButton("Standby")
-        self.standby_btn.setToolTip("Put calibrator in standby mode")
-        self.standby_btn.clicked.connect(self._on_standby)
-        test_btn_layout.addWidget(self.standby_btn)
+        # Default: show Basic, hide Prompt
+        self.details_tabs.setTabVisible(self._basic_tab_index, True)
+        self.details_tabs.setTabVisible(self._calibrator_tab_index, True)
+        self.details_tabs.setTabVisible(self._dmm_tab_index, True)
+        self.details_tabs.setTabVisible(self._prompt_tab_index, False)
 
-        details_layout.addRow("Calibrator:", test_btn_layout)
-
-        main_splitter.addWidget(details_group)
-
-        # Set splitter sizes
-        main_splitter.setSizes([250, 350, 300])
-
-        layout.addWidget(main_splitter)
+        if index == 0:  # Measurement
+            self.details_tabs.setTabVisible(self._dmm_tab_index, False)
+        elif index == 1:  # Pass/Fail
+            # Hide Basic, show Calibrator, DMM, Prompt
+            self.details_tabs.setTabVisible(self._basic_tab_index, False)
+            self.details_tabs.setTabVisible(self._prompt_tab_index, True)
+        elif index == 2:  # Calculated
+            self.details_tabs.setTabVisible(self._calibrator_tab_index, False)
+            self.details_tabs.setTabVisible(self._dmm_tab_index, False)
+        elif index == 3:  # DMM Measurement
+            self.details_tabs.setTabVisible(self._calibrator_tab_index, False)
+        # index == 4 (Calibrator + DMM) shows Basic, Calibrator, DMM, Advanced
 
     def _on_new_procedure(self):
         """Create new procedure - clears form for new entry."""
@@ -298,16 +1437,50 @@ class ProceduresTab(QWidget):
     def _clear_test_point_form(self):
         """Clear the test point details form."""
         self.test_type_combo.setCurrentIndex(0)
+        self._on_test_type_changed(0)  # Reset tab visibility
         self.nominal_input.setValue(0)
         self.unit_combo.setCurrentIndex(0)
         self.frequency_input.setValue(0)
         self.tolerance_input.setValue(0)
+        self.pass_fail_prompt_input.clear()
+        self.operational_check_input.clear()
+        # Pass/Fail range check fields
+        self.pass_fail_min_input.setValue(self.pass_fail_min_input.minimum())
+        self.pass_fail_max_input.setValue(self.pass_fail_max_input.minimum())
+        self.pass_fail_range_unit.setCurrentIndex(0)
+        # Pre-conditioning fields
+        self.pre_nominal_input.setValue(0)
+        self.pre_unit_combo.setCurrentIndex(0)
+        self.pre_frequency_input.setValue(0)
+        self.pre_freq_unit_combo.setCurrentIndex(0)
+        self.pre_delay_input.setValue(0)
+        self.pre_steps_table.setRowCount(0)
+        # Commands
         self.cmd_template_combo.setCurrentIndex(0)
         self.source_cmd_input.clear()
         self.operate_cmd_input.clear()
         self.measure_cmd_input.clear()
         self.excel_sheet_input.clear()
         self.excel_cell_input.clear()
+        # Measurement target
+        self.measurement_target_combo.setCurrentIndex(0)
+        self.expected_value_input.setValue(0)
+        self.expected_unit_combo.setCurrentIndex(0)
+        self.expected_value_input.setVisible(False)
+        self.expected_unit_combo.setVisible(False)
+        # Wiring diagram and operator instructions
+        self.wiring_combo.setCurrentIndex(0)
+        self.operator_prompt_edit.clear()
+        # Formula
+        self.formula_input.clear()
+        # DMM config
+        self._clear_dmm_config()
+
+    def _on_measurement_target_changed(self, text: str):
+        """Show/hide custom expected value fields based on measurement target selection."""
+        is_custom = (text == "Custom")
+        self.expected_value_input.setVisible(is_custom)
+        self.expected_unit_combo.setVisible(is_custom)
 
     def _load_command_templates(self):
         """Load available command bank templates into dropdown."""
@@ -333,6 +1506,28 @@ class ProceduresTab(QWidget):
 
         except Exception as e:
             logger.error(f"Failed to load command templates: {e}")
+
+    def _load_wiring_diagram_types(self):
+        """Load wiring diagram types from library into dropdown."""
+        current_text = self.wiring_combo.currentText()
+        self.wiring_combo.clear()
+        self.wiring_combo.addItem("None", None)
+
+        # Load all section types (built-in + custom)
+        try:
+            for section_type in get_all_section_types():
+                self.wiring_combo.addItem(section_type, section_type)
+
+            logger.debug(f"Loaded wiring diagram types")
+
+            # Restore selection if possible
+            if current_text:
+                idx = self.wiring_combo.findText(current_text)
+                if idx >= 0:
+                    self.wiring_combo.setCurrentIndex(idx)
+
+        except Exception as e:
+            logger.error(f"Failed to load wiring diagram types: {e}")
 
     def _on_template_selected(self, index: int):
         """Apply selected command template to form."""
@@ -591,22 +1786,61 @@ class ProceduresTab(QWidget):
                 self.target_make_input.setText(procedure.target_make or "")
                 self.target_model_input.setText(procedure.target_model or "")
 
-                # Load sections and test points into tree
-                self.structure_tree.clear()
+                # Clean up any corrupted section names (with accumulated [type] suffixes)
+                sections_cleaned = False
                 for section in procedure.sections:
-                    section_item = QTreeWidgetItem(self.structure_tree)
-                    section_item.setText(0, section.name)
-                    section_item.setData(0, Qt.ItemDataRole.UserRole, ("section", section.id))
-                    section_item.setFlags(section_item.flags() | Qt.ItemFlag.ItemIsEditable)
+                    original_name = section.name
+                    clean_name = original_name
+                    # Remove all trailing [...] suffixes that may have accumulated
+                    while re.search(r'\s*\[[^\]]+\]\s*$', clean_name):
+                        clean_name = re.sub(r'\s*\[[^\]]+\]\s*$', '', clean_name).strip()
+                    if clean_name != original_name:
+                        section.name = clean_name
+                        sections_cleaned = True
+                        logger.info(f"Cleaned corrupted section name: '{original_name}' -> '{clean_name}'")
 
-                    for tp in section.test_points:
-                        tp_item = QTreeWidgetItem(section_item)
-                        tp_item.setText(0, tp.description or f"{tp.nominal_value} {tp.unit}")
-                        tp_item.setText(1, f"{tp.nominal_value or 0} {tp.unit or ''}")
-                        tp_item.setText(2, f"±{tp.tolerance_value or 0}{tp.tolerance_type.value if tp.tolerance_type else '%'}")
-                        tp_item.setData(0, Qt.ItemDataRole.UserRole, ("testpoint", tp.id))
+                if sections_cleaned:
+                    session.commit()
 
-                self.structure_tree.expandAll()
+                # Load sections and test points into tree
+                # Block signals to prevent itemChanged from firing during programmatic updates
+                self.structure_tree.blockSignals(True)
+                try:
+                    self.structure_tree.clear()
+                    for section in procedure.sections:
+                        section_item = QTreeWidgetItem(self.structure_tree)
+
+                        # Show standard type if set
+                        display_text = section.name
+                        if section.standard_section_type:
+                            display_text = f"{section.name} [{section.standard_section_type}]"
+
+                        section_item.setText(0, display_text)
+                        section_item.setData(0, Qt.ItemDataRole.UserRole, ("section", section.id))
+
+                        for tp in section.test_points:
+                            tp_item = QTreeWidgetItem(section_item)
+
+                            # For Pass/Fail, show operational check text; for others show nominal value
+                            if tp.test_type and tp.test_type.value == "pass_fail":
+                                check_text = tp.operator_prompt or "Pass/Fail Check"
+                                tp_item.setText(0, tp.description or check_text)
+                                tp_item.setText(1, check_text)
+                                tp_item.setText(2, "Pass/Fail")
+                            else:
+                                # Build nominal string with frequency if present
+                                nominal_str = f"{tp.nominal_value or 0} {tp.unit or ''}"
+                                if tp.frequency:
+                                    nominal_str += f" @ {tp.frequency} {tp.frequency_unit or 'Hz'}"
+                                tp_item.setText(0, tp.description or nominal_str)
+                                tp_item.setText(1, nominal_str)
+                                tp_item.setText(2, f"±{tp.tolerance_value or 0}{tp.tolerance_type.value if tp.tolerance_type else '%'}")
+
+                            tp_item.setData(0, Qt.ItemDataRole.UserRole, ("testpoint", tp.id))
+
+                    self.structure_tree.expandAll()
+                finally:
+                    self.structure_tree.blockSignals(False)
                 logger.info(f"Loaded procedure: {procedure.name}")
 
         except Exception as e:
@@ -619,6 +1853,13 @@ class ProceduresTab(QWidget):
                 self, "No Procedure", "Please save the procedure first before adding sections."
             )
             return
+
+        # Show section edit dialog
+        dialog = SectionEditDialog("New Section", "", self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        name, standard_type = dialog.get_values()
 
         db = get_db()
         if not db.is_connected:
@@ -633,24 +1874,100 @@ class ProceduresTab(QWidget):
 
                 section = TestSection(
                     procedure_id=self._current_procedure_id,
-                    name="New Section",
+                    name=name,
+                    standard_section_type=standard_type or None,
                     order=max_order,
                 )
                 session.add(section)
                 session.flush()
 
-                # Add to tree
-                section_item = QTreeWidgetItem(self.structure_tree)
-                section_item.setText(0, section.name)
-                section_item.setData(0, Qt.ItemDataRole.UserRole, ("section", section.id))
-                section_item.setFlags(section_item.flags() | Qt.ItemFlag.ItemIsEditable)
-                self.structure_tree.setCurrentItem(section_item)
-                self.structure_tree.editItem(section_item, 0)
+                # Add to tree - show standard type if set
+                # Block signals to prevent itemChanged from firing
+                self.structure_tree.blockSignals(True)
+                try:
+                    display_text = name
+                    if standard_type:
+                        display_text = f"{name} [{standard_type}]"
 
-                logger.debug(f"Added new section: {section.id}")
+                    section_item = QTreeWidgetItem(self.structure_tree)
+                    section_item.setText(0, display_text)
+                    section_item.setData(0, Qt.ItemDataRole.UserRole, ("section", section.id))
+                    self.structure_tree.setCurrentItem(section_item)
+                finally:
+                    self.structure_tree.blockSignals(False)
+
+                logger.debug(f"Added new section: {section.id} ({name}, type={standard_type})")
 
         except Exception as e:
             logger.error(f"Failed to add section: {e}")
+
+    def _on_edit_section(self):
+        """Edit the selected section's name and standard type."""
+        current = self.structure_tree.currentItem()
+        if not current:
+            QMessageBox.warning(self, "No Selection", "Please select a section to edit.")
+            return
+
+        data = current.data(0, Qt.ItemDataRole.UserRole)
+        if not data:
+            return
+
+        # If test point selected, get parent section
+        if data[0] == "testpoint":
+            current = current.parent()
+            if not current:
+                return
+            data = current.data(0, Qt.ItemDataRole.UserRole)
+
+        if data[0] != "section":
+            QMessageBox.warning(self, "Invalid Selection", "Please select a section.")
+            return
+
+        section_id = data[1]
+
+        db = get_db()
+        if not db.is_connected:
+            return
+
+        try:
+            # Load current section data
+            with db.session() as session:
+                section = session.query(TestSection).filter(TestSection.id == section_id).first()
+                if not section:
+                    return
+
+                current_name = section.name
+                current_type = section.standard_section_type or ""
+
+            # Show edit dialog
+            dialog = SectionEditDialog(current_name, current_type, self)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+
+            name, standard_type = dialog.get_values()
+
+            # Save changes
+            with db.session() as session:
+                section = session.query(TestSection).filter(TestSection.id == section_id).first()
+                if section:
+                    section.name = name
+                    section.standard_section_type = standard_type or None
+
+            # Update tree display - block signals to prevent itemChanged from firing
+            self.structure_tree.blockSignals(True)
+            try:
+                display_text = name
+                if standard_type:
+                    display_text = f"{name} [{standard_type}]"
+                current.setText(0, display_text)
+            finally:
+                self.structure_tree.blockSignals(False)
+
+            logger.info(f"Updated section {section_id}: {name} [{standard_type}]")
+
+        except Exception as e:
+            logger.error(f"Failed to edit section: {e}")
+            QMessageBox.critical(self, "Error", f"Failed to edit section:\n{e}")
 
     def _on_add_testpoint(self):
         """Add a new test point to the selected section."""
@@ -706,6 +2023,104 @@ class ProceduresTab(QWidget):
         except Exception as e:
             logger.error(f"Failed to add test point: {e}")
 
+    def _on_set_wiring_diagram(self):
+        """Set wiring diagram for the selected section."""
+        current = self.structure_tree.currentItem()
+        if not current:
+            QMessageBox.warning(self, "No Selection", "Please select a section first.")
+            return
+
+        # Get section (if test point selected, get parent section)
+        data = current.data(0, Qt.ItemDataRole.UserRole)
+        if not data:
+            return
+
+        if data[0] == "testpoint":
+            # Get parent section
+            section_item = current.parent()
+            if section_item:
+                data = section_item.data(0, Qt.ItemDataRole.UserRole)
+
+        if not data or data[0] != "section":
+            QMessageBox.warning(self, "No Section", "Please select a section.")
+            return
+
+        section_id = data[1]
+        section_name = current.text(0) if data[0] == "section" else current.parent().text(0)
+
+        # Get target model from procedure
+        target_model = self.target_model_input.text().strip()
+        if not target_model:
+            QMessageBox.warning(
+                self, "No Target Model",
+                "Please set the Target Model in Procedure Structure.\n\n"
+                "This is used to find matching wiring diagrams."
+            )
+            return
+
+        # Show wiring diagram selection dialog
+        dialog = WiringDiagramSelectionDialog(target_model, section_name, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            selected = dialog.get_selected()
+            if selected:
+                self._link_diagram_to_section(section_id, selected)
+
+    def _link_diagram_to_section(self, section_id: int, diagram_info: dict):
+        """Create a direct link between section + calibrator model -> library diagram."""
+        db = get_db()
+        if not db.is_connected:
+            return
+
+        try:
+            # Get the calibrator model for the link
+            # e.g., "Fluke 5550A" -> "5550A"
+            link_calibrator = diagram_info.get('link_calibrator_model', '')
+            cal_model = link_calibrator.split()[-1] if link_calibrator else ''
+
+            if not cal_model:
+                QMessageBox.warning(self, "No Calibrator", "No calibrator model specified.")
+                return
+
+            diagram_id = diagram_info.get('id')
+            if not diagram_id:
+                QMessageBox.warning(self, "No Diagram", "No diagram ID found.")
+                return
+
+            with db.session() as session:
+                # Check if a link already exists for this section + calibrator
+                existing = session.query(SectionDiagramLink).filter(
+                    SectionDiagramLink.section_id == section_id,
+                    SectionDiagramLink.calibrator_model == cal_model
+                ).first()
+
+                if existing:
+                    # Update existing link
+                    existing.diagram_id = diagram_id
+                    logger.info(f"Updated diagram link for section {section_id} + {cal_model}")
+                else:
+                    # Create new link
+                    link = SectionDiagramLink(
+                        section_id=section_id,
+                        calibrator_model=cal_model,
+                        diagram_id=diagram_id,
+                    )
+                    session.add(link)
+                    logger.info(f"Created diagram link for section {section_id} + {cal_model}")
+
+            QMessageBox.information(
+                self, "Diagram Linked",
+                f"Wiring diagram linked for:\n\n"
+                f"  Section: {section_id}\n"
+                f"  Calibrator: {link_calibrator}\n"
+                f"  Diagram: {diagram_info.get('filename', 'Unknown')}\n\n"
+                "During execution, when using this calibrator with this section,\n"
+                "this diagram will be displayed automatically."
+            )
+
+        except Exception as e:
+            logger.error(f"Failed to link wiring diagram: {e}")
+            QMessageBox.critical(self, "Error", f"Failed to link diagram:\n{e}")
+
     def _on_tree_item_selected(self):
         """Handle tree item selection - loads details into form."""
         current = self.structure_tree.currentItem()
@@ -738,6 +2153,17 @@ class ProceduresTab(QWidget):
         if not new_name:
             return
 
+        # Strip any [standard_type] suffix from display text
+        # Display format is "Section Name [Standard Type]" - we only want "Section Name"
+        # Remove all trailing [...] suffixes that may have accumulated
+        new_name = re.sub(r'\s*\[[^\]]+\]\s*$', '', new_name).strip()
+        # Keep removing in case multiple suffixes accumulated
+        while re.search(r'\s*\[[^\]]+\]\s*$', new_name):
+            new_name = re.sub(r'\s*\[[^\]]+\]\s*$', '', new_name).strip()
+
+        if not new_name:
+            return
+
         db = get_db()
         if not db.is_connected:
             return
@@ -764,10 +2190,10 @@ class ProceduresTab(QWidget):
                     return
 
                 # Test type
-                type_map = {"measurement": 0, "pass_fail": 1, "calculated": 2}
-                self.test_type_combo.setCurrentIndex(
-                    type_map.get(tp.test_type.value if tp.test_type else "measurement", 0)
-                )
+                type_map = {"measurement": 0, "pass_fail": 1, "calculated": 2, "dmm_measurement": 3, "calibrator_dmm": 4}
+                type_index = type_map.get(tp.test_type.value if tp.test_type else "measurement", 0)
+                self.test_type_combo.setCurrentIndex(type_index)
+                self._on_test_type_changed(type_index)  # Update tab visibility
 
                 # Nominal value and unit
                 self.nominal_input.setValue(tp.nominal_value or 0)
@@ -779,6 +2205,13 @@ class ProceduresTab(QWidget):
 
                 # Frequency
                 self.frequency_input.setValue(tp.frequency or 0)
+                # Set frequency unit
+                freq_unit = tp.frequency_unit or "Hz"
+                freq_idx = self.freq_unit_combo.findText(freq_unit)
+                if freq_idx >= 0:
+                    self.freq_unit_combo.setCurrentIndex(freq_idx)
+                else:
+                    self.freq_unit_combo.setCurrentIndex(0)  # Default to Hz
 
                 # Tolerance
                 self.tolerance_input.setValue(tp.tolerance_value or 0)
@@ -786,6 +2219,37 @@ class ProceduresTab(QWidget):
                 self.tolerance_type_combo.setCurrentIndex(
                     tol_map.get(tp.tolerance_type.value if tp.tolerance_type else "percent", 0)
                 )
+
+                # Pass/Fail prompt and range
+                self.pass_fail_prompt_input.setText(tp.pass_fail_prompt or "")
+                if tp.pass_fail_min is not None:
+                    self.pass_fail_min_input.setValue(tp.pass_fail_min)
+                else:
+                    self.pass_fail_min_input.setValue(self.pass_fail_min_input.minimum())
+                if tp.pass_fail_max is not None:
+                    self.pass_fail_max_input.setValue(tp.pass_fail_max)
+                else:
+                    self.pass_fail_max_input.setValue(self.pass_fail_max_input.minimum())
+                if tp.pass_fail_range_unit:
+                    idx = self.pass_fail_range_unit.findText(tp.pass_fail_range_unit)
+                    if idx >= 0:
+                        self.pass_fail_range_unit.setCurrentIndex(idx)
+
+                # Pre-conditioning
+                self.pre_nominal_input.setValue(tp.pre_nominal_value or 0)
+                pre_unit_idx = self.pre_unit_combo.findText(tp.pre_unit or "Ohm")
+                if pre_unit_idx >= 0:
+                    self.pre_unit_combo.setCurrentIndex(pre_unit_idx)
+                else:
+                    self.pre_unit_combo.setCurrentText(tp.pre_unit or "Ohm")
+                self.pre_frequency_input.setValue(tp.pre_frequency or 0)
+                pre_freq_idx = self.pre_freq_unit_combo.findText(tp.pre_frequency_unit or "Hz")
+                if pre_freq_idx >= 0:
+                    self.pre_freq_unit_combo.setCurrentIndex(pre_freq_idx)
+                self.pre_delay_input.setValue(tp.pre_delay_seconds or 0)
+
+                # Load additional pre-conditioning steps
+                self._load_pre_steps(tp.pre_conditioning_steps or [])
 
                 # Commands
                 self.source_cmd_input.setText(tp.source_command or "")
@@ -796,6 +2260,46 @@ class ProceduresTab(QWidget):
                 self.excel_sheet_input.setText(tp.excel_sheet or "")
                 self.excel_cell_input.setText(tp.excel_cell or "")
 
+                # Measurement target
+                mt_map = {"PRIMARY": 0, "FREQUENCY": 1, "CUSTOM": 2}
+                mt_value = tp.measurement_target.value if tp.measurement_target else "PRIMARY"
+                self.measurement_target_combo.setCurrentIndex(mt_map.get(mt_value, 0))
+                self.expected_value_input.setValue(tp.expected_value or 0)
+                if tp.expected_unit:
+                    eu_idx = self.expected_unit_combo.findText(tp.expected_unit)
+                    if eu_idx >= 0:
+                        self.expected_unit_combo.setCurrentIndex(eu_idx)
+                    else:
+                        self.expected_unit_combo.setCurrentText(tp.expected_unit)
+                # Show/hide custom fields
+                self._on_measurement_target_changed(self.measurement_target_combo.currentText())
+
+                # Operator prompt - for Pass/Fail, load into operational check; for others, load into Advanced tab
+                if tp.test_type and tp.test_type.value == "pass_fail":
+                    self.operational_check_input.setText(tp.operator_prompt or "")
+                    self.operator_prompt_edit.clear()
+                else:
+                    self.operator_prompt_edit.setPlainText(tp.operator_prompt or "")
+                    self.operational_check_input.clear()
+
+                # Wiring diagram type
+                if tp.wiring_diagram_type:
+                    idx = self.wiring_combo.findText(tp.wiring_diagram_type)
+                    if idx >= 0:
+                        self.wiring_combo.setCurrentIndex(idx)
+                    else:
+                        # Type not in current list, add it temporarily
+                        self.wiring_combo.addItem(tp.wiring_diagram_type, tp.wiring_diagram_type)
+                        self.wiring_combo.setCurrentText(tp.wiring_diagram_type)
+                else:
+                    self.wiring_combo.setCurrentIndex(0)  # None
+
+                # Formula (for calculated test points)
+                self.formula_input.setText(tp.formula or "")
+
+                # DMM configuration
+                self._load_dmm_config(tp.dmm_config)
+
                 logger.debug(f"Loaded test point: {tp_id}")
 
         except Exception as e:
@@ -805,36 +2309,73 @@ class ProceduresTab(QWidget):
         """Save the current test point from form to database."""
         current = self.structure_tree.currentItem()
         if not current:
+            QMessageBox.warning(self, "No Selection", "Please select a test point to save.")
             return
 
         data = current.data(0, Qt.ItemDataRole.UserRole)
         if not data or data[0] != "testpoint":
+            QMessageBox.warning(self, "Invalid Selection", "Please select a test point (not a section) to save.")
             return
 
         tp_id = data[1]
 
         db = get_db()
         if not db.is_connected:
+            QMessageBox.critical(self, "Database Error", "Not connected to database.")
             return
 
         try:
             with db.session() as session:
                 tp = session.query(TestPoint).filter(TestPoint.id == tp_id).first()
                 if not tp:
+                    QMessageBox.warning(self, "Not Found", "Test point not found in database.")
                     return
 
                 # Update from form
-                type_map = {0: "measurement", 1: "pass_fail", 2: "calculated"}
+                type_map = {0: "measurement", 1: "pass_fail", 2: "calculated", 3: "dmm_measurement", 4: "calibrator_dmm"}
                 from calsystem.database.models import TestPointType, ToleranceType
                 tp.test_type = TestPointType(type_map[self.test_type_combo.currentIndex()])
 
                 tp.nominal_value = self.nominal_input.value()
                 tp.unit = self.unit_combo.currentText()
                 tp.frequency = self.frequency_input.value() if self.frequency_input.value() > 0 else None
+                tp.frequency_unit = self.freq_unit_combo.currentText() if self.frequency_input.value() > 0 else "Hz"
 
                 tp.tolerance_value = self.tolerance_input.value()
                 tol_map = {0: "percent", 1: "absolute", 2: "ppm"}
                 tp.tolerance_type = ToleranceType(tol_map[self.tolerance_type_combo.currentIndex()])
+
+                # Pass/Fail prompt and range
+                tp.pass_fail_prompt = self.pass_fail_prompt_input.toPlainText().strip() or None
+                # Only save range if values are set (not at minimum/special value)
+                min_val = self.pass_fail_min_input.value()
+                max_val = self.pass_fail_max_input.value()
+                if min_val > self.pass_fail_min_input.minimum():
+                    tp.pass_fail_min = min_val
+                else:
+                    tp.pass_fail_min = None
+                if max_val > self.pass_fail_max_input.minimum():
+                    tp.pass_fail_max = max_val
+                else:
+                    tp.pass_fail_max = None
+                # Only save unit if at least one range value is set
+                if tp.pass_fail_min is not None or tp.pass_fail_max is not None:
+                    tp.pass_fail_range_unit = self.pass_fail_range_unit.currentText()
+                else:
+                    tp.pass_fail_range_unit = None
+
+                # Pre-conditioning
+                pre_val = self.pre_nominal_input.value()
+                tp.pre_nominal_value = pre_val if pre_val != 0 else None
+                tp.pre_unit = self.pre_unit_combo.currentText() if pre_val != 0 else None
+                pre_freq = self.pre_frequency_input.value()
+                tp.pre_frequency = pre_freq if pre_freq > 0 else None
+                tp.pre_frequency_unit = self.pre_freq_unit_combo.currentText() if pre_freq > 0 else "Hz"
+                tp.pre_delay_seconds = self.pre_delay_input.value() if pre_val != 0 else 0
+
+                # Save additional pre-conditioning steps
+                pre_steps = self._save_pre_steps()
+                tp.pre_conditioning_steps = pre_steps if pre_steps else None
 
                 tp.source_command = self.source_cmd_input.text().strip() or None
                 tp.operate_command = self.operate_cmd_input.text().strip() or None
@@ -843,15 +2384,68 @@ class ProceduresTab(QWidget):
                 tp.excel_sheet = self.excel_sheet_input.text().strip() or None
                 tp.excel_cell = self.excel_cell_input.text().strip() or None
 
-                # Update tree display
-                current.setText(0, tp.description or f"{tp.nominal_value} {tp.unit}")
-                current.setText(1, f"{tp.nominal_value} {tp.unit}")
-                current.setText(2, f"±{tp.tolerance_value}{tp.tolerance_type.value}")
+                # Measurement target
+                from calsystem.database.models import MeasurementTarget
+                mt_map = {0: "PRIMARY", 1: "FREQUENCY", 2: "CUSTOM"}
+                tp.measurement_target = MeasurementTarget(mt_map[self.measurement_target_combo.currentIndex()])
+                if tp.measurement_target == MeasurementTarget.CUSTOM:
+                    tp.expected_value = self.expected_value_input.value()
+                    tp.expected_unit = self.expected_unit_combo.currentText()
+                else:
+                    tp.expected_value = None
+                    tp.expected_unit = None
 
-                logger.debug(f"Saved test point: {tp_id}")
+                # Operator prompt - for Pass/Fail, use operational check; for others, use Advanced tab prompt
+                if tp.test_type.value == "pass_fail":
+                    prompt_text = self.operational_check_input.text().strip()
+                else:
+                    prompt_text = self.operator_prompt_edit.toPlainText().strip()
+                tp.operator_prompt = prompt_text if prompt_text else None
+
+                # Wiring diagram type
+                wiring_type = self.wiring_combo.currentData()
+                tp.wiring_diagram_type = wiring_type if wiring_type else None
+
+                # Formula (for calculated test points)
+                formula_text = self.formula_input.text().strip()
+                tp.formula = formula_text if formula_text else None
+
+                # DMM configuration - save if test type uses DMM or Pass/Fail with range check
+                test_type_index = self.test_type_combo.currentIndex()
+                # Check if Pass/Fail has range check configured
+                has_range_check = (
+                    self.pass_fail_min_input.value() > self.pass_fail_min_input.minimum() or
+                    self.pass_fail_max_input.value() > self.pass_fail_max_input.minimum()
+                )
+                if test_type_index in [1, 3, 4] or has_range_check:  # Pass/Fail, DMM Measurement, or Calibrator + DMM
+                    tp.dmm_config = self._save_dmm_config()
+                else:
+                    tp.dmm_config = None
+
+                # Update tree display - for Pass/Fail show operational check, for others show nominal
+                if tp.test_type.value == "pass_fail":
+                    # Pass/Fail: show operational check text instead of nominal value
+                    check_text = tp.operator_prompt or "Pass/Fail Check"
+                    current.setText(0, tp.description or check_text)
+                    current.setText(1, check_text)
+                    current.setText(2, "Pass/Fail")
+                else:
+                    # Other types: show nominal value with frequency if present
+                    nominal_str = f"{tp.nominal_value} {tp.unit}"
+                    if tp.frequency:
+                        nominal_str += f" @ {tp.frequency} {tp.frequency_unit}"
+                    current.setText(0, tp.description or nominal_str)
+                    current.setText(1, nominal_str)
+                    current.setText(2, f"±{tp.tolerance_value}{tp.tolerance_type.value}")
+
+                logger.info(f"Saved test point: {tp_id}")
+
+            # Show brief confirmation in status bar if available, or message box
+            self.window().statusBar().showMessage("Test point saved", 2000)
 
         except Exception as e:
             logger.error(f"Failed to save test point: {e}")
+            QMessageBox.critical(self, "Save Error", f"Failed to save test point:\n{e}")
 
     def _on_remove_item(self):
         """Remove selected section or test point."""
@@ -1070,11 +2664,18 @@ class ProceduresTab(QWidget):
             logger.error(f"Failed to add wiring diagram: {e}")
             QMessageBox.critical(self, "Error", f"Failed to add wiring diagram:\n{e}")
 
-    def _get_calibrator_address(self) -> Optional[str]:
-        """Get the VISA address of a calibrator from workstation standards."""
+    def _get_workstation_calibrators(self) -> List[Dict[str, Any]]:
+        """
+        Get all calibrators from workstation standards.
+
+        Returns:
+            List of calibrator dicts with address, make, model, serial, has_command_bank.
+        """
         db = get_db()
         if not db.is_connected:
-            return None
+            return []
+
+        calibrators = []
 
         try:
             from calsystem.config.settings import get_settings
@@ -1082,17 +2683,297 @@ class ProceduresTab(QWidget):
             workstation_name = settings.workstation_name or "Default Workstation"
 
             with db.session() as session:
-                # Get workstation config
                 config = session.query(WorkstationConfig).filter(
                     WorkstationConfig.name == workstation_name
                 ).first()
 
                 if not config:
-                    return None
+                    logger.warning(f"No workstation config found: {workstation_name}")
+                    return []
 
-                # Find a calibrator in the workstation standards
+                # Get all calibrators from workstation
                 ws_standards = session.query(WorkstationStandard).filter(
-                    WorkstationStandard.workstation_config_id == config.id
+                    WorkstationStandard.workstation_id == config.id
+                ).all()
+
+                # Get all command banks for lookup
+                command_banks = session.query(CommandBank.make, CommandBank.model).all()
+                cb_set = {(cb.make.lower(), cb.model.lower()) for cb in command_banks}
+
+                for ws_std in ws_standards:
+                    standard = session.query(Standard).filter(
+                        Standard.id == ws_std.standard_id
+                    ).first()
+
+                    if standard and standard.device_group == DeviceGroupType.CALIBRATOR:
+                        has_cb = (standard.make.lower(), standard.model.lower()) in cb_set
+                        calibrators.append({
+                            "standard_id": standard.id,
+                            "address": ws_std.visa_address or standard.visa_address or "",
+                            "make": standard.make,
+                            "model": standard.model,
+                            "serial": standard.serial_number or "",
+                            "has_command_bank": has_cb,
+                        })
+
+                logger.info(f"Found {len(calibrators)} calibrators in workstation")
+                return calibrators
+
+        except Exception as e:
+            logger.error(f"Failed to get workstation calibrators: {e}")
+            return []
+
+    def _detect_connected_calibrators(self) -> List[Dict[str, Any]]:
+        """
+        Scan VISA bus and match connected instruments to workstation calibrators.
+
+        Returns:
+            List of connected calibrators with their info.
+        """
+        if not PYVISA_AVAILABLE:
+            return []
+
+        # Get workstation calibrators
+        workstation_cals = self._get_workstation_calibrators()
+        if not workstation_cals:
+            return []
+
+        # Scan VISA instruments
+        visa = get_visa_manager()
+        detected = visa.scan_and_identify()
+
+        logger.info(f"Detected {len(detected)} VISA instruments")
+
+        connected_calibrators = []
+
+        for cal in workstation_cals:
+            cal_address = cal.get("address", "")
+            cal_make = cal.get("make", "").lower()
+            cal_model = cal.get("model", "").lower()
+
+            # Check if this calibrator is connected
+            for inst in detected:
+                if not inst.is_connected:
+                    continue
+
+                # Match by address
+                if cal_address and inst.address == cal_address:
+                    cal["detected_address"] = inst.address
+                    cal["detected_make"] = inst.manufacturer
+                    cal["detected_model"] = inst.model
+                    connected_calibrators.append(cal)
+                    logger.info(f"Matched calibrator by address: {cal['make']} {cal['model']} at {inst.address}")
+                    break
+
+                # Match by make/model (fuzzy)
+                inst_make = inst.manufacturer.lower()
+                inst_model = inst.model.lower()
+
+                if (cal_make in inst_make or inst_make in cal_make) and \
+                   (cal_model in inst_model or inst_model in cal_model):
+                    cal["detected_address"] = inst.address
+                    cal["detected_make"] = inst.manufacturer
+                    cal["detected_model"] = inst.model
+                    connected_calibrators.append(cal)
+                    logger.info(f"Matched calibrator by make/model: {cal['make']} {cal['model']} at {inst.address}")
+                    break
+
+        return connected_calibrators
+
+    def _select_calibrator(self, force_reselect: bool = False) -> Optional[Dict[str, Any]]:
+        """
+        Select a calibrator to use. Uses cached selection if available.
+
+        Args:
+            force_reselect: If True, ignore cached selection and re-detect.
+
+        Returns:
+            Selected calibrator dict, or None if cancelled/not found.
+        """
+        # Use cached selection if available
+        if self._selected_calibrator and not force_reselect:
+            logger.debug(f"Using cached calibrator: {self._selected_calibrator['make']} {self._selected_calibrator['model']}")
+            return self._selected_calibrator
+
+        # Detect connected calibrators
+        connected = self._detect_connected_calibrators()
+
+        if not connected:
+            QMessageBox.warning(
+                self, "No Calibrator Connected",
+                "No calibrators detected on the VISA bus.\n\n"
+                "Please check that:\n"
+                "1. Your calibrator is powered on\n"
+                "2. It's connected via GPIB/USB/LAN\n"
+                "3. It's added to your workstation standards (Workstation tab)\n"
+                "4. The Group is set to 'Calibrator'"
+            )
+            return None
+
+        if len(connected) == 1:
+            # Auto-select the only calibrator
+            self._selected_calibrator = connected[0]
+            self._load_calibrator_commands()
+            logger.info(f"Auto-selected calibrator: {connected[0]['make']} {connected[0]['model']}")
+
+            QMessageBox.information(
+                self, "Calibrator Detected",
+                f"Using calibrator: {connected[0]['make']} {connected[0]['model']}\n"
+                f"Address: {connected[0].get('detected_address', connected[0].get('address', 'Unknown'))}"
+            )
+            return self._selected_calibrator
+
+        # Multiple calibrators - show selection dialog
+        dialog = CalibratorSelectionDialog(connected, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._selected_calibrator = dialog.get_selected_calibrator()
+            if self._selected_calibrator:
+                self._load_calibrator_commands()
+                logger.info(f"User selected calibrator: {self._selected_calibrator['make']} {self._selected_calibrator['model']}")
+                return self._selected_calibrator
+
+        return None
+
+    def _load_calibrator_commands(self):
+        """Load command bank for the selected calibrator."""
+        if not self._selected_calibrator:
+            self._selected_calibrator_commands = None
+            return
+
+        make = self._selected_calibrator.get("make", "")
+        model = self._selected_calibrator.get("model", "")
+
+        db = get_db()
+        if not db.is_connected:
+            self._selected_calibrator_commands = None
+            return
+
+        try:
+            with db.session() as session:
+                # Look up command bank by make/model (case-insensitive)
+                command_bank = session.query(CommandBank).filter(
+                    CommandBank.make.ilike(make),
+                    CommandBank.model.ilike(model)
+                ).first()
+
+                if command_bank and command_bank.commands:
+                    self._selected_calibrator_commands = command_bank.commands
+                    logger.info(f"Loaded command bank for {make} {model}: {list(self._selected_calibrator_commands.keys())}")
+                else:
+                    self._selected_calibrator_commands = None
+                    logger.warning(f"No command bank found for {make} {model}")
+
+        except Exception as e:
+            logger.error(f"Failed to load command bank: {e}")
+            self._selected_calibrator_commands = None
+
+    def _get_calibrator_command(self, command_name: str) -> Optional[str]:
+        """
+        Get a command from the selected calibrator's command bank.
+
+        Args:
+            command_name: Command name (e.g., 'OUT', 'OPER', 'STBY')
+
+        Returns:
+            Command string, or None if not found.
+        """
+        if not self._selected_calibrator_commands:
+            return None
+
+        # Try exact match first
+        if command_name in self._selected_calibrator_commands:
+            return self._selected_calibrator_commands[command_name]
+
+        # Try case-insensitive match
+        for key, value in self._selected_calibrator_commands.items():
+            if key.lower() == command_name.lower():
+                return value
+
+        return None
+
+    def _get_calibrator_address(self) -> Optional[str]:
+        """Get the VISA address of the selected calibrator."""
+        if not self._selected_calibrator:
+            return None
+        return self._selected_calibrator.get("detected_address") or self._selected_calibrator.get("address")
+
+    def _substitute_placeholders(self, command: str) -> str:
+        """
+        Substitute placeholders in command.
+
+        Placeholders:
+            {value} - Nominal value (e.g., 10)
+            {unit} - Unit string (e.g., V, mV, A, Ohm)
+            {frequency} - Frequency value as entered (e.g., 1 if 1 kHz)
+            {freq_unit} - Frequency unit string (e.g., Hz, kHz, MHz)
+            {freq_hz} - Frequency converted to Hz (e.g., 1000 for 1 kHz)
+
+        If frequency > 0 and command doesn't contain frequency placeholders,
+        automatically appends ",{freq_hz} HZ" for AC outputs.
+        """
+        if not command:
+            return ""
+
+        value = self.nominal_input.value()
+        unit = self.unit_combo.currentText()
+        frequency = self.frequency_input.value()
+        freq_unit = self.freq_unit_combo.currentText()
+
+        # Calculate frequency in Hz
+        freq_hz = frequency
+        if freq_unit == "kHz":
+            freq_hz = frequency * 1000
+        elif freq_unit == "MHz":
+            freq_hz = frequency * 1000000
+
+        result = command
+
+        # Auto-append frequency for AC outputs if command doesn't have frequency placeholder
+        has_freq_placeholder = "{freq" in command or "{frequency}" in command
+        if freq_hz > 0 and not has_freq_placeholder:
+            # Append frequency in Fluke-style format: OUT 1 V,60 HZ
+            result = result + ",{freq_hz} HZ"
+
+        result = result.replace("{value}", str(value))
+        result = result.replace("{unit}", unit)
+        result = result.replace("{frequency}", str(frequency) if frequency > 0 else "")
+        result = result.replace("{freq_unit}", freq_unit if frequency > 0 else "")
+        result = result.replace("{freq_hz}", str(int(freq_hz)) if freq_hz > 0 else "")
+
+        return result
+
+    # ==================== DMM Detection & Selection ====================
+
+    def _get_workstation_dmms(self) -> List[Dict[str, Any]]:
+        """
+        Get all DMMs from workstation standards.
+
+        Returns:
+            List of DMM dicts with address, make, model, serial.
+        """
+        db = get_db()
+        if not db.is_connected:
+            return []
+
+        dmms = []
+
+        try:
+            from calsystem.config.settings import get_settings
+            settings = get_settings()
+            workstation_name = settings.workstation_name or "Default Workstation"
+
+            with db.session() as session:
+                config = session.query(WorkstationConfig).filter(
+                    WorkstationConfig.name == workstation_name
+                ).first()
+
+                if not config:
+                    logger.warning(f"No workstation config found: {workstation_name}")
+                    return []
+
+                # Get all standards from workstation
+                ws_standards = session.query(WorkstationStandard).filter(
+                    WorkstationStandard.workstation_id == config.id
                 ).all()
 
                 for ws_std in ws_standards:
@@ -1100,42 +2981,262 @@ class ProceduresTab(QWidget):
                         Standard.id == ws_std.standard_id
                     ).first()
 
-                    if standard and standard.device_group == DeviceGroupType.calibrator:
-                        return ws_std.visa_address
+                    if standard and standard.device_group == DeviceGroupType.DMM:
+                        dmms.append({
+                            "standard_id": standard.id,
+                            "address": ws_std.visa_address or standard.visa_address or "",
+                            "make": standard.make,
+                            "model": standard.model,
+                            "serial": standard.serial_number or "",
+                        })
 
-                # If no calibrator found, return first standard with an address
-                for ws_std in ws_standards:
-                    if ws_std.visa_address:
-                        return ws_std.visa_address
-
-                return None
+                logger.info(f"Found {len(dmms)} DMMs in workstation")
+                return dmms
 
         except Exception as e:
-            logger.error(f"Failed to get calibrator address: {e}")
+            logger.error(f"Failed to get workstation DMMs: {e}")
+            return []
+
+    def _select_dmm(self, force_reselect: bool = False) -> Optional[Dict[str, Any]]:
+        """
+        Select a DMM to use from workstation config. No VISA scanning.
+
+        Args:
+            force_reselect: If True, ignore cached selection.
+
+        Returns:
+            Selected DMM dict, or None if cancelled/not found.
+        """
+        # Use cached selection if available
+        if self._selected_dmm and not force_reselect:
+            logger.debug(f"Using cached DMM: {self._selected_dmm['make']} {self._selected_dmm['model']}")
+            return self._selected_dmm
+
+        # Get DMMs from workstation config (no scanning)
+        workstation_dmms = self._get_workstation_dmms()
+
+        if not workstation_dmms:
+            QMessageBox.warning(
+                self, "No DMM Configured",
+                "No DMMs found in workstation configuration.\n\n"
+                "Please add your DMM to workstation standards (Workstation tab)\n"
+                "with Group set to 'DMM'."
+            )
             return None
 
-    def _substitute_placeholders(self, command: str) -> str:
-        """Substitute {value}, {unit}, {frequency} placeholders in command."""
-        if not command:
-            return ""
+        if len(workstation_dmms) == 1:
+            # Auto-select the only DMM
+            self._selected_dmm = workstation_dmms[0]
+            logger.info(f"Using DMM from workstation: {workstation_dmms[0]['make']} {workstation_dmms[0]['model']} at {workstation_dmms[0].get('address', 'Unknown')}")
+            return self._selected_dmm
 
-        value = self.nominal_input.value()
-        unit = self.unit_combo.currentText()
-        frequency = self.frequency_input.value()
+        # Multiple DMMs - show selection dialog
+        from PyQt6.QtWidgets import QInputDialog
+        items = [f"{d['make']} {d['model']} ({d.get('address', 'Unknown')})"
+                 for d in workstation_dmms]
+        item, ok = QInputDialog.getItem(
+            self, "Select DMM",
+            "Multiple DMMs in workstation. Select one:",
+            items, 0, False
+        )
 
-        # Handle frequency unit conversion
-        freq_unit = self.freq_unit_combo.currentText()
-        if freq_unit == "kHz":
-            frequency *= 1000
-        elif freq_unit == "MHz":
-            frequency *= 1000000
+        if ok and item:
+            idx = items.index(item)
+            self._selected_dmm = workstation_dmms[idx]
+            logger.info(f"User selected DMM: {self._selected_dmm['make']} {self._selected_dmm['model']}")
+            return self._selected_dmm
 
-        result = command
-        result = result.replace("{value}", str(value))
-        result = result.replace("{unit}", unit)
-        result = result.replace("{frequency}", str(frequency) if frequency > 0 else "")
+        return None
 
-        return result
+    def _get_dmm_address(self) -> Optional[str]:
+        """Get the VISA address of the selected DMM from workstation config."""
+        if not self._selected_dmm:
+            return None
+        return self._selected_dmm.get("address")
+
+    def _on_test_dmm_reading(self):
+        """Test the DMM settings by sending commands and taking a reading."""
+        if not PYVISA_AVAILABLE:
+            QMessageBox.warning(
+                self, "PyVISA Not Available",
+                "PyVISA is not installed. Cannot communicate with instruments."
+            )
+            return
+
+        # Select DMM (auto-detect or from cache)
+        dmm = self._select_dmm()
+        if not dmm:
+            return
+
+        address = self._get_dmm_address()
+        if not address:
+            QMessageBox.warning(
+                self, "No Address",
+                "Selected DMM has no VISA address.\n\n"
+                "Please check the workstation standard configuration."
+            )
+            return
+
+        # Build command sequence from current DMM settings
+        commands = []
+        func = self.dmm_func_combo.currentText()
+        range_val = self.dmm_range_combo.currentText()
+        delay = self.dmm_delay_input.value()
+
+        # Collect custom commands by order (Before/After)
+        before_cmds = []
+        after_cmds = []
+        for row in range(self.dmm_commands_table.rowCount()):
+            cmd_item = self.dmm_commands_table.item(row, 1)
+            order_widget = self.dmm_commands_table.cellWidget(row, 2)
+            if cmd_item:
+                cmd = cmd_item.text().strip()
+                if cmd:
+                    order = "After"
+                    if order_widget and isinstance(order_widget, QComboBox):
+                        order = order_widget.currentText()
+                    if order == "Before":
+                        before_cmds.append(cmd)
+                    else:
+                        after_cmds.append(cmd)
+
+        # 1. Custom "Before" commands (e.g., RESET, END ALWAYS)
+        commands.extend(before_cmds)
+
+        # 2. Core settings - using HP 3458A syntax (most common high-end DMM)
+        commands.append(f"FUNC {func}")
+        if range_val != "AUTO":
+            commands.append(f"RANGE {range_val}")
+        else:
+            commands.append("ARANGE ON")  # Auto-range (3458A)
+
+        # 3. Optional settings (only what's in the table)
+        optional_count = self.dmm_optional_table.rowCount()
+        logger.debug(f"Optional settings table has {optional_count} rows")
+        for row in range(optional_count):
+            name_item = self.dmm_optional_table.item(row, 0)
+            value_widget = self.dmm_optional_table.cellWidget(row, 1)
+            if name_item and value_widget and isinstance(value_widget, QComboBox):
+                setting_name = name_item.text()
+                setting_value = value_widget.currentText()
+                logger.debug(f"  Row {row}: {setting_name} = {setting_value}")
+                commands.append(f"{setting_name} {setting_value}")
+
+        # 4. Delay
+        if delay > 0:
+            commands.append(f"DELAY {delay}")
+
+        # 5. Custom "After" commands
+        commands.extend(after_cmds)
+
+        logger.info(f"Testing DMM reading at {address}")
+        logger.info(f"Commands: {commands}")
+
+        visa = get_visa_manager()
+        errors = []
+        success_cmds = []
+
+        # Send all setup commands
+        for cmd in commands:
+            if visa.write(address, cmd):
+                success_cmds.append(cmd)
+            else:
+                errors.append(f"Failed: {cmd}")
+
+        if errors:
+            QMessageBox.critical(
+                self, "DMM Setup Failed",
+                "Some commands failed:\n\n" + "\n".join(errors) +
+                "\n\nSuccessful:\n" + "\n".join(success_cmds)
+            )
+            return
+
+        # Take a reading
+        import time
+        time.sleep(0.1)  # Brief settle time
+
+        # For 3458A: trigger and read
+        reading = None
+
+        # Try TRIG SGL first (3458A style)
+        visa.write(address, "TRIG SGL")
+        time.sleep(0.2)  # Wait for measurement
+
+        # Query returns (success, response) tuple
+        success, response = visa.query(address, "")
+        if success and response:
+            reading = response.strip()
+        else:
+            # Try explicit read command
+            success, response = visa.query(address, "READ?")
+            if success and response:
+                reading = response.strip()
+
+        if reading:
+            dmm_info = f"{dmm['make']} {dmm['model']}"
+
+            # Get expected unit from test point to format reading
+            expected_value = self.nominal_input.value()
+            expected_unit = self.unit_combo.currentText()
+
+            # Convert reading to match test point unit
+            try:
+                raw_value = float(reading)
+
+                # Unit conversion multipliers (from base unit to display unit)
+                # DMM returns in base units (V, A, Ohm, Hz)
+                unit_divisors = {
+                    "mV": 0.001, "uV": 0.000001, "kV": 1000,
+                    "mA": 0.001, "uA": 0.000001,
+                    "kOhm": 1000, "MOhm": 1000000,
+                    "kHz": 1000, "MHz": 1000000,
+                    "V": 1, "A": 1, "Ohm": 1, "Hz": 1,
+                }
+
+                divisor = unit_divisors.get(expected_unit, 1.0)
+                converted_value = raw_value / divisor
+
+                # Get decimal places from dropdown
+                format_selection = self.dmm_reading_format_combo.currentText()
+                if format_selection.startswith("Match"):
+                    # Auto-determine based on expected value magnitude
+                    if expected_value >= 100:
+                        decimals = 2
+                    elif expected_value >= 10:
+                        decimals = 3
+                    elif expected_value >= 1:
+                        decimals = 4
+                    else:
+                        decimals = 5
+                else:
+                    # Parse decimal count from selection (e.g., "0.0000 (4 decimals)" -> 4)
+                    decimals = format_selection.count('0') - 1  # Count zeros after decimal
+
+                formatted_reading = f"{converted_value:.{decimals}f} {expected_unit}"
+
+                QMessageBox.information(
+                    self, "DMM Test Reading",
+                    f"DMM ({dmm_info}) returned:\n\n"
+                    f"   {formatted_reading}\n"
+                    f"   (raw: {reading})\n\n"
+                    f"   Expected: {expected_value} {expected_unit}\n\n"
+                    f"Setup commands sent:\n" + "\n".join(f"   {c}" for c in success_cmds)
+                )
+            except ValueError:
+                # Can't parse, show raw
+                QMessageBox.information(
+                    self, "DMM Test Reading",
+                    f"DMM ({dmm_info}) returned:\n\n"
+                    f"   {reading}\n\n"
+                    f"Setup commands sent:\n" + "\n".join(f"   {c}" for c in success_cmds)
+                )
+        else:
+            QMessageBox.warning(
+                self, "No Reading",
+                "DMM setup commands sent successfully, but no reading was returned.\n\n"
+                "The DMM may need a trigger or the read command may be different.\n\n"
+                f"Commands sent:\n" + "\n".join(f"   {c}" for c in success_cmds)
+            )
 
     def _on_test_output(self):
         """Test the current test point by sending commands to calibrator."""
@@ -1146,29 +3247,54 @@ class ProceduresTab(QWidget):
             )
             return
 
-        # Get calibrator address
+        # Select calibrator (auto-detect or from cache)
+        calibrator = self._select_calibrator()
+        if not calibrator:
+            return  # User cancelled or no calibrator found
+
         address = self._get_calibrator_address()
         if not address:
             QMessageBox.warning(
-                self, "No Calibrator",
-                "No calibrator found in workstation standards.\n\n"
-                "Please add a calibrator to your workstation in the Workstation tab first."
+                self, "No Address",
+                "Selected calibrator has no VISA address.\n\n"
+                "Please check the workstation standard configuration."
             )
             return
 
-        # Get commands from form
-        source_cmd = self._substitute_placeholders(self.source_cmd_input.text())
+        # Get commands - prefer form input, fall back to command bank
+        source_cmd = self.source_cmd_input.text().strip()
         operate_cmd = self.operate_cmd_input.text().strip()
+
+        # If no source command in form, try to get from command bank
+        if not source_cmd:
+            # Try common source command names from command bank
+            for cmd_name in ["OUT", "SOURCE", "OUTPUT", "out", "source"]:
+                bank_cmd = self._get_calibrator_command(cmd_name)
+                if bank_cmd:
+                    source_cmd = bank_cmd
+                    logger.info(f"Using command bank source command: {source_cmd}")
+                    break
 
         if not source_cmd:
             QMessageBox.warning(
                 self, "No Source Command",
-                "No source command defined for this test point.\n\n"
-                "Enter a source command like 'OUT {value} {unit}' and try again."
+                "No source command defined.\n\n"
+                "Either:\n"
+                "1. Enter a source command in the form (e.g., 'OUT {value} {unit}')\n"
+                "2. Or create a command bank for this calibrator with an 'OUT' command"
             )
             return
 
+        # Apply placeholder substitution
+        source_cmd = self._substitute_placeholders(source_cmd)
+
+        # If no operate command, try command bank
+        if not operate_cmd:
+            operate_cmd = self._get_calibrator_command("OPER") or \
+                          self._get_calibrator_command("OPERATE") or ""
+
         logger.info(f"Testing output: {source_cmd} to {address}")
+        logger.info(f"Using calibrator: {calibrator['make']} {calibrator['model']}")
 
         visa = get_visa_manager()
         errors = []
@@ -1203,36 +3329,633 @@ class ProceduresTab(QWidget):
             if freq > 0:
                 output_desc += f" @ {freq} {freq_unit}"
 
+            cal_info = f"{calibrator['make']} {calibrator['model']}"
+
             QMessageBox.information(
                 self, "Test Output Success",
-                f"Calibrator is now outputting:\n\n"
+                f"Calibrator ({cal_info}) is now outputting:\n\n"
                 f"   {output_desc}\n\n"
                 f"Commands sent:\n" + "\n".join(f"   {m}" for m in success_msgs) +
                 f"\n\nClick 'Standby' when done to turn off the output."
             )
+
+    def _on_preview_passfail(self):
+        """Preview the Pass/Fail dialog as the technician would see it."""
+        # Get prompt text
+        prompt_text = self.pass_fail_prompt_input.toPlainText().strip()
+        if not prompt_text:
+            prompt_text = "(No prompt entered)"
+
+        # Get range check info
+        min_val = self.pass_fail_min_input.value()
+        max_val = self.pass_fail_max_input.value()
+        has_min = min_val > self.pass_fail_min_input.minimum()
+        has_max = max_val > self.pass_fail_max_input.minimum()
+        range_unit = self.pass_fail_range_unit.currentText()
+
+        range_text = ""
+        if has_min or has_max:
+            if has_min and has_max:
+                range_text = f"Expected range: {min_val} to {max_val} {range_unit}"
+            elif has_min:
+                range_text = f"Minimum: {min_val} {range_unit}"
+            else:
+                range_text = f"Maximum: {max_val} {range_unit}"
+
+        # Get wiring diagram (from Advanced tab)
+        wiring_type = self.wiring_combo.currentText()
+        wiring_image = None
+
+        if wiring_type and wiring_type != "None" and not wiring_type.startswith("--"):
+            # Try to load the wiring diagram image from library
+            db = get_db()
+            if db.is_connected:
+                try:
+                    with db.session() as session:
+                        # Look up in WiringDiagramLibrary by section_name
+                        diagram = session.query(WiringDiagramLibrary).filter(
+                            WiringDiagramLibrary.section_name == wiring_type
+                        ).first()
+
+                        if diagram and diagram.image_data:
+                            wiring_image = diagram.image_data
+                except Exception as e:
+                    logger.warning(f"Failed to load wiring diagram: {e}")
+
+        # Create preview dialog
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Pass/Fail Preview")
+        dialog.setMinimumWidth(500)
+        layout = QVBoxLayout(dialog)
+
+        # Title
+        title = QLabel("Pass/Fail Test Point Preview")
+        title.setStyleSheet("font-size: 16px; font-weight: bold;")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(title)
+
+        subtitle = QLabel("This is what the technician will see during execution")
+        subtitle.setStyleSheet("color: gray; font-style: italic;")
+        subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(subtitle)
+
+        layout.addSpacing(10)
+
+        # Wiring diagram (if any)
+        if wiring_image:
+            wiring_group = QGroupBox("Wiring Diagram")
+            wiring_layout = QVBoxLayout(wiring_group)
+
+            image_label = QLabel()
+            pixmap = QPixmap()
+            pixmap.loadFromData(wiring_image)
+            if not pixmap.isNull():
+                # Scale to fit
+                scaled = pixmap.scaled(450, 300, Qt.AspectRatioMode.KeepAspectRatio,
+                                       Qt.TransformationMode.SmoothTransformation)
+                image_label.setPixmap(scaled)
+                image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            else:
+                image_label.setText("(Could not load image)")
+
+            wiring_layout.addWidget(image_label)
+            layout.addWidget(wiring_group)
+        elif wiring_type and not wiring_type.startswith("--"):
+            no_image_label = QLabel(f"Wiring diagram selected: {wiring_type}\n(Image not found in database)")
+            no_image_label.setStyleSheet("color: orange;")
+            layout.addWidget(no_image_label)
+
+        # Prompt
+        prompt_group = QGroupBox("Technician Prompt")
+        prompt_layout = QVBoxLayout(prompt_group)
+
+        prompt_label = QLabel(prompt_text)
+        prompt_label.setWordWrap(True)
+        prompt_label.setStyleSheet("font-size: 14px; padding: 10px;")
+        prompt_layout.addWidget(prompt_label)
+
+        if range_text:
+            range_label = QLabel(range_text)
+            range_label.setStyleSheet("color: blue; font-weight: bold; padding: 5px;")
+            prompt_layout.addWidget(range_label)
+
+        layout.addWidget(prompt_group)
+
+        # Sample Pass/Fail buttons (disabled, just for preview)
+        btn_layout = QHBoxLayout()
+        pass_btn = QPushButton("PASS")
+        pass_btn.setStyleSheet("background-color: #4CAF50; color: white; font-size: 14px; padding: 10px 30px;")
+        pass_btn.setEnabled(False)
+        btn_layout.addWidget(pass_btn)
+
+        fail_btn = QPushButton("FAIL")
+        fail_btn.setStyleSheet("background-color: #f44336; color: white; font-size: 14px; padding: 10px 30px;")
+        fail_btn.setEnabled(False)
+        btn_layout.addWidget(fail_btn)
+
+        layout.addLayout(btn_layout)
+
+        # Close button
+        layout.addSpacing(10)
+        close_btn = QPushButton("Close Preview")
+        close_btn.clicked.connect(dialog.accept)
+        layout.addWidget(close_btn)
+
+        dialog.exec()
+
+    def _on_test_pass_fail(self):
+        """Test the full Pass/Fail flow simulating execution session."""
+        from PyQt6.QtWidgets import QProgressDialog
+
+        if not PYVISA_AVAILABLE:
+            QMessageBox.warning(
+                self, "PyVISA Not Available",
+                "PyVISA is not installed. Cannot communicate with instruments."
+            )
+            return
+
+        visa = get_visa_manager()
+
+        # ========== STEP 1: Show Wiring Diagram (if configured) ==========
+        wiring_type = self.wiring_combo.currentText()
+        wiring_image = None
+
+        if wiring_type and wiring_type != "None" and not wiring_type.startswith("--"):
+            db = get_db()
+            if db.is_connected:
+                try:
+                    with db.session() as session:
+                        diagram = session.query(WiringDiagramLibrary).filter(
+                            WiringDiagramLibrary.section_name == wiring_type
+                        ).first()
+                        if diagram and diagram.image_data:
+                            wiring_image = diagram.image_data
+                except Exception as e:
+                    logger.warning(f"Failed to load wiring diagram: {e}")
+
+            if wiring_image:
+                # Show wiring diagram dialog first
+                wiring_dialog = QDialog(self)
+                wiring_dialog.setWindowTitle("Wiring Setup")
+                wiring_dialog.setMinimumWidth(500)
+                wiring_layout = QVBoxLayout(wiring_dialog)
+
+                title = QLabel("Connect the DUT as shown:")
+                title.setStyleSheet("font-size: 14px; font-weight: bold;")
+                wiring_layout.addWidget(title)
+
+                image_label = QLabel()
+                pixmap = QPixmap()
+                pixmap.loadFromData(wiring_image)
+                if not pixmap.isNull():
+                    scaled = pixmap.scaled(450, 350, Qt.AspectRatioMode.KeepAspectRatio,
+                                           Qt.TransformationMode.SmoothTransformation)
+                    image_label.setPixmap(scaled)
+                    image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                wiring_layout.addWidget(image_label)
+
+                btn_layout = QHBoxLayout()
+                cancel_btn = QPushButton("Cancel")
+                cancel_btn.clicked.connect(wiring_dialog.reject)
+                btn_layout.addWidget(cancel_btn)
+                btn_layout.addStretch()
+                proceed_btn = QPushButton("Ready - Proceed")
+                proceed_btn.setStyleSheet("font-weight: bold;")
+                proceed_btn.clicked.connect(wiring_dialog.accept)
+                btn_layout.addWidget(proceed_btn)
+                wiring_layout.addLayout(btn_layout)
+
+                if wiring_dialog.exec() != QDialog.DialogCode.Accepted:
+                    return  # User cancelled
+
+        # ========== STEP 2: Run Calibrator (if configured) ==========
+        calibrator = None
+        cal_address = None
+        cal_info = ""
+        source_cmd = self.source_cmd_input.text().strip()
+
+        # Check if we have calibrator settings
+        if source_cmd or self.pre_nominal_input.value() != 0:
+            calibrator = self._select_calibrator()
+            if calibrator:
+                cal_address = self._get_calibrator_address()
+                cal_info = f"{calibrator['make']} {calibrator['model']}"
+
+                if not cal_address:
+                    QMessageBox.warning(self, "No Address", "Selected calibrator has no VISA address.")
+                    return
+
+                # Get source command from bank if not set
+                if not source_cmd:
+                    for cmd_name in ["OUT", "SOURCE", "OUTPUT"]:
+                        bank_cmd = self._get_calibrator_command(cmd_name)
+                        if bank_cmd:
+                            source_cmd = bank_cmd
+                            break
+
+                operate_cmd = self.operate_cmd_input.text().strip()
+                if not operate_cmd:
+                    operate_cmd = self._get_calibrator_command("OPER") or ""
+
+                # Pre-conditioning
+                pre_value = self.pre_nominal_input.value()
+                if pre_value != 0 and source_cmd:
+                    pre_cmd = self._substitute_pre_placeholders(source_cmd)
+                    logger.info(f"Pre-conditioning: {pre_cmd}")
+
+                    if not visa.write(cal_address, pre_cmd):
+                        QMessageBox.critical(self, "Error", "Failed to send pre-conditioning command.")
+                        return
+
+                    if operate_cmd:
+                        visa.write(cal_address, operate_cmd)
+
+                    # Wait for delay
+                    delay = self.pre_delay_input.value()
+                    if delay > 0:
+                        progress = QProgressDialog(f"Pre-conditioning delay: {delay}s", None, 0, int(delay * 10), self)
+                        progress.setWindowTitle("Pre-conditioning")
+                        progress.setWindowModality(Qt.WindowModality.WindowModal)
+                        progress.setMinimumDuration(0)
+                        progress.setValue(0)
+
+                        start_time = time.time()
+                        while time.time() - start_time < delay:
+                            elapsed = time.time() - start_time
+                            progress.setValue(int(elapsed * 10))
+                            progress.setLabelText(f"Waiting {delay - elapsed:.1f} seconds...")
+                            QApplication.processEvents()
+                            time.sleep(0.05)
+                        progress.close()
+
+                # Send actual calibrator output
+                if source_cmd:
+                    actual_cmd = self._substitute_placeholders(source_cmd)
+                    logger.info(f"Calibrator output: {actual_cmd}")
+
+                    if not visa.write(cal_address, actual_cmd):
+                        QMessageBox.critical(self, "Error", "Failed to send calibrator command.")
+                        return
+
+                    if operate_cmd:
+                        visa.write(cal_address, operate_cmd)
+
+        # ========== STEP 3: Take DMM Reading (if range check configured) ==========
+        dmm_reading = None
+        dmm_reading_str = None
+        range_result = None  # "in_range", "out_of_range", or None
+
+        min_val = self.pass_fail_min_input.value()
+        max_val = self.pass_fail_max_input.value()
+        has_min = min_val > self.pass_fail_min_input.minimum()
+        has_max = max_val > self.pass_fail_max_input.minimum()
+        range_unit = self.pass_fail_range_unit.currentText()
+
+        if has_min or has_max:
+            # Determine decimal places from range values
+            def get_decimal_places(value: float) -> int:
+                """Count decimal places in a float value."""
+                s = str(value)
+                if '.' in s:
+                    return len(s.split('.')[1].rstrip('0')) or 0
+                return 0
+
+            # Use the max decimal places from min/max values
+            decimals = 0
+            if has_min:
+                decimals = max(decimals, get_decimal_places(min_val))
+            if has_max:
+                decimals = max(decimals, get_decimal_places(max_val))
+            # Ensure at least 1 decimal for readability
+            decimals = max(decimals, 1)
+
+            # Range check requires DMM reading
+            dmm = self._select_dmm()
+            if dmm:
+                dmm_address = self._get_dmm_address()
+                if dmm_address:
+                    # Determine function from range unit
+                    unit_lower = range_unit.lower()
+                    if 'ohm' in unit_lower:
+                        dmm_func = "OHM"
+                    elif 'a' in unit_lower and 'ohm' not in unit_lower:
+                        dmm_func = "DCI"
+                    else:
+                        dmm_func = "DCV"
+
+                    # Build command sequence from saved DMM config
+                    # Get custom commands separated by order
+                    before_cmds = []
+                    after_cmds = []
+                    for row in range(self.dmm_commands_table.rowCount()):
+                        cmd_item = self.dmm_commands_table.item(row, 1)
+                        order_widget = self.dmm_commands_table.cellWidget(row, 2)
+                        if cmd_item:
+                            cmd = cmd_item.text().strip()
+                            if cmd:
+                                order = "After"
+                                if order_widget and isinstance(order_widget, QComboBox):
+                                    order = order_widget.currentText()
+                                if order == "Before":
+                                    before_cmds.append(cmd)
+                                else:
+                                    after_cmds.append(cmd)
+
+                    # 1. Send "Before" commands (e.g., RESET, END ALWAYS)
+                    for cmd in before_cmds:
+                        logger.debug(f"DMM Before cmd: {cmd}")
+                        visa.write(dmm_address, cmd)
+
+                    # 2. Setup function and range
+                    visa.write(dmm_address, f"FUNC {dmm_func}")
+                    range_val = self.dmm_range_combo.currentText()
+                    if range_val != "AUTO":
+                        visa.write(dmm_address, f"RANGE {range_val}")
+                    else:
+                        visa.write(dmm_address, "ARANGE ON")
+
+                    # 3. Optional settings
+                    for row in range(self.dmm_optional_table.rowCount()):
+                        name_item = self.dmm_optional_table.item(row, 0)
+                        value_widget = self.dmm_optional_table.cellWidget(row, 1)
+                        if name_item and value_widget and isinstance(value_widget, QComboBox):
+                            setting_name = name_item.text()
+                            setting_value = value_widget.currentText()
+                            visa.write(dmm_address, f"{setting_name} {setting_value}")
+
+                    # 4. Delay setting
+                    delay = self.dmm_delay_input.value()
+                    if delay > 0:
+                        visa.write(dmm_address, f"DELAY {delay}")
+
+                    # 5. Send "After" commands
+                    for cmd in after_cmds:
+                        logger.debug(f"DMM After cmd: {cmd}")
+                        visa.write(dmm_address, cmd)
+
+                    time.sleep(0.2)
+
+                    # Take reading
+                    visa.write(dmm_address, "TRIG SGL")
+                    time.sleep(0.3)
+
+                    success, response = visa.query(dmm_address, "")
+                    if success and response:
+                        try:
+                            raw_value = float(response.strip())
+
+                            # Convert to range unit
+                            unit_divisors = {
+                                "mV": 0.001, "uV": 0.000001,
+                                "mA": 0.001, "uA": 0.000001,
+                                "kOhm": 1000, "MOhm": 1000000,
+                                "V": 1, "A": 1, "Ohm": 1,
+                            }
+                            divisor = unit_divisors.get(range_unit, 1.0)
+                            dmm_reading = raw_value / divisor
+
+                            # Format to match range value precision
+                            dmm_reading_str = f"{dmm_reading:.{decimals}f} {range_unit}"
+
+                            # Check against range
+                            in_range = True
+                            if has_min and dmm_reading < min_val:
+                                in_range = False
+                            if has_max and dmm_reading > max_val:
+                                in_range = False
+                            range_result = "in_range" if in_range else "out_of_range"
+
+                        except ValueError:
+                            dmm_reading_str = f"Error: {response}"
+                else:
+                    dmm_reading_str = "(No DMM address)"
+            else:
+                dmm_reading_str = "(No DMM configured)"
+
+        # ========== STEP 4: Show Pass/Fail Dialog ==========
+        operational_check = self.operational_check_input.text().strip()
+        prompt = self.pass_fail_prompt_input.toPlainText().strip() or "Does this test point pass?"
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Pass/Fail Test")
+        dialog.setModal(True)
+        dialog.setMinimumWidth(500)
+
+        layout = QVBoxLayout(dialog)
+
+        # Operational check name (if set)
+        if operational_check:
+            check_label = QLabel(operational_check)
+            check_label.setStyleSheet("font-size: 18px; font-weight: bold;")
+            check_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            layout.addWidget(check_label)
+            layout.addSpacing(5)
+
+        # Calibrator info (if used)
+        if cal_info:
+            cal_label = QLabel(f"Calibrator: {cal_info}")
+            cal_label.setStyleSheet("color: #666;")
+            layout.addWidget(cal_label)
+
+        # Wiring diagram inline (smaller, if available)
+        if wiring_image:
+            image_label = QLabel()
+            pixmap = QPixmap()
+            pixmap.loadFromData(wiring_image)
+            if not pixmap.isNull():
+                scaled = pixmap.scaled(300, 200, Qt.AspectRatioMode.KeepAspectRatio,
+                                       Qt.TransformationMode.SmoothTransformation)
+                image_label.setPixmap(scaled)
+                image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                layout.addWidget(image_label)
+
+        layout.addSpacing(10)
+
+        # DMM Reading (if taken)
+        if dmm_reading_str:
+            reading_group = QGroupBox("DMM Reading")
+            reading_layout = QVBoxLayout(reading_group)
+
+            reading_label = QLabel(dmm_reading_str)
+            reading_label.setStyleSheet("font-size: 20px; font-weight: bold;")
+            reading_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            reading_layout.addWidget(reading_label)
+
+            # Range check result
+            if has_min or has_max:
+                range_str = ""
+                if has_min and has_max:
+                    range_str = f"Expected: {min_val} to {max_val} {range_unit}"
+                elif has_min:
+                    range_str = f"Minimum: {min_val} {range_unit}"
+                else:
+                    range_str = f"Maximum: {max_val} {range_unit}"
+
+                range_label = QLabel(range_str)
+                range_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                reading_layout.addWidget(range_label)
+
+                if range_result == "in_range":
+                    result_label = QLabel("✓ IN RANGE")
+                    result_label.setStyleSheet("color: #28a745; font-weight: bold; font-size: 14px;")
+                elif range_result == "out_of_range":
+                    result_label = QLabel("✗ OUT OF RANGE")
+                    result_label.setStyleSheet("color: #dc3545; font-weight: bold; font-size: 14px;")
+                else:
+                    result_label = QLabel("? Could not check")
+                    result_label.setStyleSheet("color: #ffc107; font-weight: bold;")
+                result_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                reading_layout.addWidget(result_label)
+
+            layout.addWidget(reading_group)
+
+        layout.addSpacing(10)
+
+        # Prompt
+        prompt_label = QLabel(prompt)
+        prompt_label.setStyleSheet("font-size: 16px;")
+        prompt_label.setWordWrap(True)
+        prompt_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(prompt_label)
+
+        layout.addSpacing(20)
+
+        # Pass/Fail buttons
+        btn_layout = QHBoxLayout()
+
+        fail_btn = QPushButton("FAIL")
+        fail_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #dc3545;
+                color: white;
+                font-size: 18px;
+                font-weight: bold;
+                padding: 15px 40px;
+                border-radius: 5px;
+            }
+            QPushButton:hover { background-color: #c82333; }
+        """)
+        fail_btn.clicked.connect(lambda: dialog.done(0))
+        btn_layout.addWidget(fail_btn)
+
+        btn_layout.addSpacing(20)
+
+        # Suggest PASS if in range
+        pass_text = "PASS"
+        if range_result == "in_range":
+            pass_text = "PASS (Recommended)"
+
+        pass_btn = QPushButton(pass_text)
+        pass_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #28a745;
+                color: white;
+                font-size: 18px;
+                font-weight: bold;
+                padding: 15px 40px;
+                border-radius: 5px;
+            }
+            QPushButton:hover { background-color: #218838; }
+        """)
+        pass_btn.clicked.connect(lambda: dialog.done(1))
+        btn_layout.addWidget(pass_btn)
+
+        layout.addLayout(btn_layout)
+
+        result = dialog.exec()
+
+        # ========== STEP 5: Cleanup ==========
+        # Put calibrator in standby
+        if cal_address:
+            standby_cmd = self._get_calibrator_command("STBY") or "STBY"
+            visa.write(cal_address, standby_cmd)
+
+        # Show result
+        result_str = "PASS" if result == 1 else "FAIL"
+        summary = f"Result: {result_str}"
+        if cal_info:
+            summary += "\nCalibrator is now in standby."
+
+        QMessageBox.information(self, "Test Complete", summary)
+
+    def _substitute_pre_placeholders(self, command: str) -> str:
+        """Substitute placeholders using pre-conditioning values."""
+        if not command:
+            return ""
+
+        value = self.pre_nominal_input.value()
+        unit = self.pre_unit_combo.currentText()
+        frequency = self.pre_frequency_input.value()
+        freq_unit = self.pre_freq_unit_combo.currentText()
+
+        freq_hz = frequency
+        if freq_unit == "kHz":
+            freq_hz = frequency * 1000
+        elif freq_unit == "MHz":
+            freq_hz = frequency * 1000000
+
+        result = command
+
+        # Auto-append frequency for AC
+        has_freq_placeholder = "{freq" in command or "{frequency}" in command
+        if freq_hz > 0 and not has_freq_placeholder:
+            result = result + ",{freq_hz} HZ"
+
+        result = result.replace("{value}", str(value))
+        result = result.replace("{unit}", unit)
+        result = result.replace("{frequency}", str(frequency) if frequency > 0 else "")
+        result = result.replace("{freq_unit}", freq_unit if frequency > 0 else "")
+        result = result.replace("{freq_hz}", str(int(freq_hz)) if freq_hz > 0 else "")
+
+        return result
 
     def _on_standby(self):
         """Put calibrator in standby mode."""
         if not PYVISA_AVAILABLE:
             return
 
-        address = self._get_calibrator_address()
-        if not address:
-            QMessageBox.warning(self, "No Calibrator", "No calibrator found.")
+        if not self._selected_calibrator:
+            QMessageBox.warning(self, "No Calibrator", "No calibrator selected. Use 'Test Output' first.")
             return
 
-        # Get standby command - check operate field or use default
-        operate_cmd = self.operate_cmd_input.text().strip()
-        if operate_cmd:
-            # If operate is defined, try common standby alternatives
-            standby_cmd = "STBY"
-        else:
-            standby_cmd = "STBY"
+        address = self._get_calibrator_address()
+        if not address:
+            QMessageBox.warning(self, "No Calibrator", "No calibrator address found.")
+            return
 
-        logger.info(f"Sending standby to {address}")
+        # Get standby command - check form, then command bank, then default
+        standby_cmd = self._get_calibrator_command("STBY") or \
+                      self._get_calibrator_command("STANDBY") or \
+                      "STBY"
+
+        logger.info(f"Sending standby to {address}: {standby_cmd}")
 
         visa = get_visa_manager()
         if visa.write(address, standby_cmd):
-            QMessageBox.information(self, "Standby", "Calibrator is now in standby mode.")
+            cal_info = f"{self._selected_calibrator['make']} {self._selected_calibrator['model']}"
+            QMessageBox.information(self, "Standby", f"Calibrator ({cal_info}) is now in standby mode.")
         else:
             QMessageBox.warning(self, "Standby Failed", "Failed to send standby command.")
+
+    def _on_change_calibrator(self):
+        """Allow user to change the selected calibrator."""
+        if not PYVISA_AVAILABLE:
+            QMessageBox.warning(
+                self, "PyVISA Not Available",
+                "PyVISA is not installed. Cannot communicate with instruments."
+            )
+            return
+
+        # Force reselection by clearing cache first
+        old_cal = self._selected_calibrator
+        self._selected_calibrator = None
+        self._selected_calibrator_commands = None
+
+        # Detect and select
+        calibrator = self._select_calibrator(force_reselect=True)
+
+        if not calibrator and old_cal:
+            # User cancelled, restore old selection
+            self._selected_calibrator = old_cal
+            self._load_calibrator_commands()
+            logger.info("Calibrator change cancelled, restored previous selection")

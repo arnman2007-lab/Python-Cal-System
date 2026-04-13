@@ -73,6 +73,7 @@ class UISettings(BaseSettings):
     default_input_method: str = "keyboard"  # "keyboard", "remote", or "webcam"
     confirm_on_exit: bool = True
     show_tooltips: bool = True
+    high_voltage_blink_speed_ms: int = 500  # Blink speed for high voltage warning
 
 
 def _get_config_dir() -> Path:
@@ -157,3 +158,50 @@ def reload_settings() -> Settings:
     """Reload settings (clears cache)."""
     get_settings.cache_clear()
     return get_settings()
+
+
+def save_settings(settings: Settings) -> bool:
+    """Save settings to config.json file."""
+    config_file = _get_config_dir() / "config.json"
+    try:
+        # Build config dict
+        config = {
+            "database": {
+                "db_type": settings.database.db_type,
+                "sqlite_path": settings.database.sqlite_path,
+                "host": settings.database.host,
+                "port": settings.database.port,
+                "username": settings.database.username,
+                "password": settings.database.password,
+                "database": settings.database.database,
+            },
+            "instruments": {
+                "visa_backend": settings.instruments.visa_backend,
+                "default_timeout_ms": settings.instruments.default_timeout_ms,
+                "idn_timeout_ms": settings.instruments.idn_timeout_ms,
+                "auto_detect_on_startup": settings.instruments.auto_detect_on_startup,
+            },
+            "ocr": {
+                "default_mode": settings.ocr.default_mode,
+                "webcam_device": settings.ocr.webcam_device,
+                "capture_resolution": list(settings.ocr.capture_resolution),
+                "tesseract_path": settings.ocr.tesseract_path,
+            },
+            "ui": {
+                "theme": settings.ui.theme,
+                "default_input_method": settings.ui.default_input_method,
+                "confirm_on_exit": settings.ui.confirm_on_exit,
+                "show_tooltips": settings.ui.show_tooltips,
+                "high_voltage_blink_speed_ms": settings.ui.high_voltage_blink_speed_ms,
+            },
+            "technician_name": settings.technician_name,
+            "technician_id": settings.technician_id,
+            "workstation_name": settings.workstation_name,
+        }
+
+        config_file.write_text(json.dumps(config, indent=2))
+        logger.info(f"Settings saved to {config_file}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to save settings: {e}")
+        return False
