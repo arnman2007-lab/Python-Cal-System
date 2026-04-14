@@ -34,6 +34,7 @@ from PyQt6.QtWidgets import (
     QTabWidget,
     QScrollArea,
     QStackedWidget,
+    QCheckBox,
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QPixmap, QImage
@@ -599,12 +600,46 @@ class ProceduresTab(QWidget):
             self.section_wiring_combo.addItem(section_type, section_type)
         form_layout.addRow("Wiring Diagram:", self.section_wiring_combo)
 
-        # Section command
-        self.section_command_input = QLineEdit()
-        self.section_command_input.setPlaceholderText("e.g., STBY, *RST, or leave blank")
-        form_layout.addRow("Section Command:", self.section_command_input)
-
         section_layout.addLayout(form_layout)
+
+        # Section Commands (dropdown + list for multiple commands)
+        section_layout.addWidget(QLabel("Section Commands:"))
+
+        cmd_row = QHBoxLayout()
+        self.section_cmd_combo = QComboBox()
+        self.section_cmd_combo.setMinimumWidth(150)
+        self.section_cmd_combo.addItem("-- Select Command --", "")
+        cmd_row.addWidget(self.section_cmd_combo)
+
+        self.add_cmd_btn = QPushButton("+")
+        self.add_cmd_btn.setFixedWidth(30)
+        self.add_cmd_btn.setToolTip("Add command to list")
+        self.add_cmd_btn.clicked.connect(self._add_section_command)
+        cmd_row.addWidget(self.add_cmd_btn)
+
+        self.refresh_cmd_btn = QPushButton("↻")
+        self.refresh_cmd_btn.setFixedWidth(30)
+        self.refresh_cmd_btn.setToolTip("Refresh command list from workstation calibrator")
+        self.refresh_cmd_btn.clicked.connect(self._load_section_command_refs)
+        cmd_row.addWidget(self.refresh_cmd_btn)
+
+        cmd_row.addStretch()
+        section_layout.addLayout(cmd_row)
+
+        # List of added commands
+        cmd_list_row = QHBoxLayout()
+        self.section_cmd_list = QListWidget()
+        self.section_cmd_list.setMaximumHeight(80)
+        self.section_cmd_list.setToolTip("Commands will run in order when entering this section")
+        cmd_list_row.addWidget(self.section_cmd_list)
+
+        self.remove_cmd_btn = QPushButton("−")
+        self.remove_cmd_btn.setFixedWidth(30)
+        self.remove_cmd_btn.setToolTip("Remove selected command")
+        self.remove_cmd_btn.clicked.connect(self._remove_section_command)
+        cmd_list_row.addWidget(self.remove_cmd_btn, alignment=Qt.AlignmentFlag.AlignTop)
+
+        section_layout.addLayout(cmd_list_row)
 
         # Operator prompt (multi-line text)
         section_layout.addWidget(QLabel("Operator Prompt:"))
@@ -617,7 +652,7 @@ class ProceduresTab(QWidget):
         help_label = QLabel(
             "Standard Type: Categorizes the section for organization.\n"
             "Wiring Diagram: Which diagram to show (defaults to Standard Type).\n"
-            "Section Command: Sent to calibrator when entering section.\n"
+            "Section Commands: Reference commands from Command Bank (run in order).\n"
             "Operator Prompt: Instructions shown before starting the section."
         )
         help_label.setStyleSheet("color: gray; font-size: 10px;")
@@ -626,10 +661,26 @@ class ProceduresTab(QWidget):
 
         section_layout.addSpacing(5)
 
+        # Button row
+        button_layout = QHBoxLayout()
+
         # Save button
         self.save_section_btn = QPushButton("Save Section")
         self.save_section_btn.clicked.connect(self._save_current_section)
-        section_layout.addWidget(self.save_section_btn)
+        button_layout.addWidget(self.save_section_btn)
+
+        # Test Section button
+        self.test_section_btn = QPushButton("Test Section")
+        self.test_section_btn.setToolTip("Preview section prompt and wiring diagram")
+        self.test_section_btn.clicked.connect(self._on_test_section)
+        button_layout.addWidget(self.test_section_btn)
+
+        # Send Command checkbox
+        self.send_command_checkbox = QCheckBox("Send Command")
+        self.send_command_checkbox.setToolTip("Also send the Section Command to calibrator when testing")
+        button_layout.addWidget(self.send_command_checkbox)
+
+        section_layout.addLayout(button_layout)
 
         section_layout.addStretch()
 
@@ -2296,14 +2347,100 @@ class ProceduresTab(QWidget):
                 else:
                     self.section_wiring_combo.setCurrentIndex(0)
 
-                # Set section command
-                self.section_command_input.setText(section.section_command or "")
+                # Set section commands (load from JSON)
+                self._load_section_command_refs()  # Refresh dropdown
+                self._set_section_commands_from_json(section.section_command)
 
                 # Set operator prompt
                 self.section_prompt_input.setPlainText(section.section_prompt or "")
 
         except Exception as e:
             logger.error(f"Failed to load section details: {e}")
+
+    def _load_section_command_refs(self):
+        """Load command references from active workstation calibrator's command bank."""
+        self.section_cmd_combo.clear()
+        self.section_cmd_combo.addItem("-- Select Command --", "")
+
+        db = get_db()
+        if not db.is_connected:
+            return
+
+        try:
+            with db.session() as session:
+                # Get ACTIVE workstation calibrators
+                from calsystem.database.models import Standard, CommandBank, DeviceGroupType, WorkstationStandard
+                calibrators = session.query(Standard).join(
+                    WorkstationStandard, WorkstationStandard.standard_id == Standard.id
+                ).filter(
+                    WorkstationStandard.is_active == True,
+                    Standard.device_group == DeviceGroupType.CALIBRATOR
+                ).all()
+
+                commands_found = set()
+                for cal in calibrators:
+                    # Get command bank for this calibrator
+                    cmd_bank = session.query(CommandBank).filter(
+                        CommandBank.make == cal.make,
+                        CommandBank.model == cal.model
+                    ).first()
+
+                    if cmd_bank and cmd_bank.commands:
+                        for ref_name in cmd_bank.commands.keys():
+                            commands_found.add(ref_name)
+
+                # Add sorted commands to dropdown
+                for cmd_ref in sorted(commands_found):
+                    self.section_cmd_combo.addItem(cmd_ref, cmd_ref)
+
+                logger.debug(f"Loaded {len(commands_found)} command references")
+
+        except Exception as e:
+            logger.error(f"Failed to load command references: {e}")
+
+    def _add_section_command(self):
+        """Add selected command to the section command list."""
+        cmd_ref = self.section_cmd_combo.currentData()
+        if not cmd_ref:
+            return
+
+        # Check if already in list
+        for i in range(self.section_cmd_list.count()):
+            if self.section_cmd_list.item(i).text() == cmd_ref:
+                return  # Already added
+
+        self.section_cmd_list.addItem(cmd_ref)
+
+    def _remove_section_command(self):
+        """Remove selected command from the list."""
+        current = self.section_cmd_list.currentRow()
+        if current >= 0:
+            self.section_cmd_list.takeItem(current)
+
+    def _get_section_commands_json(self) -> str:
+        """Get section commands as JSON string for saving."""
+        import json
+        commands = []
+        for i in range(self.section_cmd_list.count()):
+            commands.append(self.section_cmd_list.item(i).text())
+        return json.dumps(commands) if commands else None
+
+    def _set_section_commands_from_json(self, json_str: str):
+        """Load section commands from JSON string."""
+        import json
+        self.section_cmd_list.clear()
+        if json_str:
+            try:
+                commands = json.loads(json_str)
+                if isinstance(commands, list):
+                    for cmd in commands:
+                        self.section_cmd_list.addItem(cmd)
+                elif isinstance(commands, str):
+                    # Legacy: single command as string
+                    self.section_cmd_list.addItem(commands)
+            except json.JSONDecodeError:
+                # Legacy: plain string command
+                self.section_cmd_list.addItem(json_str)
 
     def _save_current_section(self):
         """Save the current section details from the form."""
@@ -2318,7 +2455,7 @@ class ProceduresTab(QWidget):
 
         standard_type = self.section_type_combo.currentData() or None
         wiring_type = self.section_wiring_combo.currentData() or None
-        section_command = self.section_command_input.text().strip() or None
+        section_command = self._get_section_commands_json()
         section_prompt = self.section_prompt_input.toPlainText().strip() or None
 
         db = get_db()
@@ -2353,6 +2490,248 @@ class ProceduresTab(QWidget):
         except Exception as e:
             logger.error(f"Failed to save section: {e}")
             QMessageBox.critical(self, "Error", f"Failed to save section: {e}")
+
+    def _on_test_section(self):
+        """Test/preview the section prompt and wiring diagram, optionally send commands."""
+        section_name = self.section_name_input.text().strip() or "Unnamed Section"
+        section_prompt = self.section_prompt_input.toPlainText().strip()
+        wiring_type = self.section_wiring_combo.currentData()
+        send_command = self.send_command_checkbox.isChecked()
+
+        # Get commands from list widget
+        section_commands = []
+        for i in range(self.section_cmd_list.count()):
+            section_commands.append(self.section_cmd_list.item(i).text())
+
+        # Fall back to standard type if no wiring override
+        if not wiring_type:
+            wiring_type = self.section_type_combo.currentData()
+
+        # Check if there's anything to test
+        has_commands = len(section_commands) > 0
+        if not section_prompt and not wiring_type and not (send_command and has_commands):
+            QMessageBox.information(
+                self,
+                "No Section Instructions",
+                f"Section '{section_name}' has no prompt, wiring diagram, or commands configured.\n\n"
+                "Add:\n"
+                "  - Operator Prompt: Instructions for the technician\n"
+                "  - Wiring Diagram: Select a type to display a diagram\n"
+                "  - Section Commands: Add commands from dropdown (check 'Send Command' to test)"
+            )
+            return
+
+        # Send commands if checkbox is checked
+        command_results = []
+        if send_command and has_commands:
+            command_results = self._send_test_commands(section_commands)
+
+        # Load wiring diagram image if specified
+        wiring_image = None
+        if wiring_type:
+            db = get_db()
+            if db.is_connected:
+                try:
+                    with db.session() as session:
+                        diagram = session.query(WiringDiagramLibrary).filter(
+                            WiringDiagramLibrary.section_name == wiring_type
+                        ).first()
+                        if diagram and diagram.image_data:
+                            wiring_image = diagram.image_data
+                except Exception as e:
+                    logger.warning(f"Failed to load wiring diagram: {e}")
+
+        # Create preview dialog
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Section Preview")
+        dialog.setMinimumWidth(500)
+        layout = QVBoxLayout(dialog)
+
+        # Title
+        title = QLabel(f"Section: {section_name}")
+        title.setStyleSheet("font-size: 16px; font-weight: bold;")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(title)
+
+        subtitle = QLabel("This is what the technician will see when entering this section")
+        subtitle.setStyleSheet("color: gray; font-style: italic;")
+        subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(subtitle)
+
+        layout.addSpacing(10)
+
+        # Wiring diagram (if any)
+        if wiring_image:
+            wiring_group = QGroupBox("Wiring Diagram")
+            wiring_layout = QVBoxLayout(wiring_group)
+
+            image_label = QLabel()
+            pixmap = QPixmap()
+            pixmap.loadFromData(wiring_image)
+            if not pixmap.isNull():
+                scaled = pixmap.scaled(450, 300, Qt.AspectRatioMode.KeepAspectRatio,
+                                       Qt.TransformationMode.SmoothTransformation)
+                image_label.setPixmap(scaled)
+                image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            else:
+                image_label.setText("(Could not load image)")
+
+            wiring_layout.addWidget(image_label)
+            layout.addWidget(wiring_group)
+        elif wiring_type:
+            no_image_label = QLabel(f"Wiring diagram selected: {wiring_type}\n(Image not found in database)")
+            no_image_label.setStyleSheet("color: orange;")
+            layout.addWidget(no_image_label)
+
+        # Operator prompt (if any)
+        if section_prompt:
+            prompt_group = QGroupBox("Operator Instructions")
+            prompt_layout = QVBoxLayout(prompt_group)
+
+            prompt_label = QLabel(section_prompt)
+            prompt_label.setWordWrap(True)
+            prompt_label.setStyleSheet("font-size: 14px; padding: 10px;")
+            prompt_layout.addWidget(prompt_label)
+
+            layout.addWidget(prompt_group)
+
+        # Command results (if commands were sent)
+        if command_results:
+            cmd_group = QGroupBox("Section Commands")
+            cmd_layout = QVBoxLayout(cmd_group)
+
+            for ref_name, actual_cmd, success in command_results:
+                if success:
+                    cmd_text = f"✓ {ref_name} → {actual_cmd}"
+                    cmd_label = QLabel(cmd_text)
+                    cmd_label.setStyleSheet("color: green; font-weight: bold;")
+                else:
+                    cmd_text = f"✗ {ref_name} → {actual_cmd or '(not found)'}"
+                    cmd_label = QLabel(cmd_text)
+                    cmd_label.setStyleSheet("color: red; font-weight: bold;")
+                cmd_layout.addWidget(cmd_label)
+
+            layout.addWidget(cmd_group)
+
+        # OK button
+        button_box = QHBoxLayout()
+        button_box.addStretch()
+        ok_btn = QPushButton("OK")
+        ok_btn.clicked.connect(dialog.accept)
+        button_box.addWidget(ok_btn)
+        layout.addLayout(button_box)
+
+        dialog.exec()
+
+    def _send_test_commands(self, command_refs: list) -> list:
+        """Send test commands to the calibrator, looking up from Command Bank.
+
+        Args:
+            command_refs: List of command reference names (e.g., ["Standby", "Reset"])
+
+        Returns:
+            List of tuples: (ref_name, actual_command, success)
+        """
+        results = []
+
+        # Get command bank for workstation calibrator
+        command_bank = self._get_workstation_command_bank()
+
+        # Get calibrator address
+        visa = get_visa_manager()
+        target = None
+
+        try:
+            resources = visa.scan()
+            if resources:
+                gpib_resources = [r for r in resources if 'GPIB' in r.upper()]
+                target = gpib_resources[0] if gpib_resources else resources[0]
+                logger.debug(f"Using VISA target: {target}")
+        except Exception as e:
+            logger.error(f"Failed to get VISA resources: {e}")
+
+        for ref_name in command_refs:
+            # Look up actual command from command bank
+            actual_cmd = command_bank.get(ref_name) if command_bank else None
+
+            # If not found by reference name, check if it's a direct SCPI command in the bank values
+            if not actual_cmd and command_bank:
+                # Maybe the ref_name IS the SCPI command (bank keys are SCPI commands)
+                if ref_name in command_bank.keys():
+                    actual_cmd = command_bank[ref_name]  # Get value (might be same or description)
+                    if not actual_cmd or actual_cmd == ref_name:
+                        actual_cmd = ref_name  # Use the key directly as command
+
+            # Still not found? Use ref_name directly as command (user typed raw SCPI)
+            if not actual_cmd:
+                logger.warning(f"Command reference '{ref_name}' not in bank, using as raw command")
+                actual_cmd = ref_name
+
+            if not target:
+                logger.warning(f"No calibrator connected for command: {actual_cmd}")
+                results.append((ref_name, actual_cmd, False))
+                continue
+
+            # Send the command
+            try:
+                logger.info(f"Sending command '{actual_cmd}' ({ref_name}) to {target}")
+                success = visa.write(target, actual_cmd)
+                results.append((ref_name, actual_cmd, bool(success)))
+                if success:
+                    logger.info(f"Command sent successfully: {actual_cmd}")
+                else:
+                    logger.warning(f"Command failed: {actual_cmd}")
+            except Exception as e:
+                logger.error(f"Failed to send command {actual_cmd}: {e}")
+                results.append((ref_name, actual_cmd, False))
+
+        return results
+
+    def _get_workstation_command_bank(self) -> dict:
+        """Get merged command bank dictionary from active workstation calibrators."""
+        db = get_db()
+        if not db.is_connected:
+            logger.warning("Database not connected for command bank lookup")
+            return {}
+
+        try:
+            with db.session() as session:
+                from calsystem.database.models import Standard, CommandBank, DeviceGroupType, WorkstationStandard
+
+                # Get ACTIVE workstation calibrators only
+                calibrators = session.query(Standard).join(
+                    WorkstationStandard, WorkstationStandard.standard_id == Standard.id
+                ).filter(
+                    WorkstationStandard.is_active == True,
+                    Standard.device_group == DeviceGroupType.CALIBRATOR
+                ).all()
+
+                if not calibrators:
+                    logger.warning("No active workstation calibrators found")
+                    return {}
+
+                # Merge command banks from all calibrators
+                merged_commands = {}
+                for calibrator in calibrators:
+                    cmd_bank = session.query(CommandBank).filter(
+                        CommandBank.make == calibrator.make,
+                        CommandBank.model == calibrator.model
+                    ).first()
+
+                    if cmd_bank and cmd_bank.commands:
+                        logger.debug(f"Found {len(cmd_bank.commands)} commands from {calibrator.make} {calibrator.model}")
+                        merged_commands.update(cmd_bank.commands)
+
+                if merged_commands:
+                    logger.debug(f"Merged command bank has {len(merged_commands)} commands: {list(merged_commands.keys())}")
+                    return merged_commands
+
+                logger.warning("No command banks found for any calibrators")
+                return {}
+
+        except Exception as e:
+            logger.error(f"Failed to get command bank: {e}")
+            return {}
 
     def _load_testpoint_details(self, tp_id: int):
         """Load test point details into the form."""
