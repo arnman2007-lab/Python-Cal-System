@@ -102,3 +102,41 @@ If there are still stories with `passes: false`, end your response normally (ano
 - Commit frequently
 - Keep CI green
 - Read the Codebase Patterns section in progress.txt before starting
+
+## Changelog Entries
+
+**IMPORTANT:** When you make changes to the application (add features, fix bugs, make improvements), you MUST add a changelog entry to track the change. The app has a Changelog tab that stores entries in the database.
+
+To add a changelog entry programmatically:
+
+```python
+from calsystem.database.connection import get_db
+from calsystem.database.models import ChangelogEntry
+from datetime import datetime
+
+db = get_db()
+if db.is_connected:
+    with db.session() as session:
+        # Calculate next version based on change type
+        # Feature/Improvement = bump minor (0.1.0 -> 0.2.0)
+        # Fix = bump patch (0.1.0 -> 0.1.1)
+        # Breaking Change = bump major (0.1.0 -> 1.0.0)
+        entry = ChangelogEntry(
+            version="X.Y.Z",  # Calculate based on previous version
+            timestamp=datetime.now(),
+            change_type="Feature",  # Feature, Fix, Improvement, Breaking Change
+            category="Standards",   # Standards, DUTs, Procedures, Execution, Reports, Libraries, Settings, UI, Database, General
+            description="Brief description of what changed",
+            author="Claude",
+        )
+        session.add(entry)
+        session.commit()
+```
+
+Categories: Standards, DUTs, Procedures, Execution, Reports, Libraries, Settings, UI, Database, General
+
+Always add a changelog entry when:
+- Adding a new feature
+- Fixing a bug
+- Making improvements to existing functionality
+- Making breaking changes

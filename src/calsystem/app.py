@@ -192,6 +192,7 @@ class CalsystemApp(QMainWindow):
         from calsystem.ui.execution.execution_tab import ExecutionTab
         from calsystem.ui.reports.reports_tab import ReportsTab
         from calsystem.ui.libraries.libraries_tab import LibrariesTab
+        from calsystem.ui.changelog.changelog_tab import ChangelogTab
 
         # Add tabs
         self.workstation_tab = WorkstationTab()
@@ -211,6 +212,9 @@ class CalsystemApp(QMainWindow):
 
         self.reports_tab = ReportsTab()
         self.tabs.addTab(self.reports_tab, "Reports")
+
+        self.changelog_tab = ChangelogTab()
+        self.tabs.addTab(self.changelog_tab, "Changelog")
 
         self.setCentralWidget(self.tabs)
 

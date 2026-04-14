@@ -744,3 +744,51 @@ class TestResult(Base):
     __table_args__ = (
         Index("ix_result_session_testpoint", "session_id", "test_point_id"),
     )
+
+
+# =============================================================================
+# Changelog Models
+# =============================================================================
+
+
+class ChangeType(PyEnum):
+    """Types of changelog entries."""
+
+    FEATURE = "Feature"
+    FIX = "Fix"
+    IMPROVEMENT = "Improvement"
+    BREAKING = "Breaking Change"
+
+
+class ChangelogEntry(Base):
+    """Application changelog entry for tracking changes and version history."""
+
+    __tablename__ = "changelog_entries"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    version = Column(String(20), nullable=False, comment="Semantic version e.g. 0.2.0")
+    timestamp = Column(DateTime, server_default=func.now(), nullable=False)
+    change_type = Column(String(30), nullable=False, comment="Feature, Fix, Improvement, Breaking Change")
+    category = Column(String(50), nullable=False, comment="Standards, DUTs, Procedures, etc.")
+    description = Column(Text, nullable=False)
+    author = Column(String(100), nullable=True, comment="Technician name or Claude")
+
+    __table_args__ = (
+        Index("ix_changelog_version", "version"),
+        Index("ix_changelog_timestamp", "timestamp"),
+    )
+
+
+# Default changelog categories
+DEFAULT_CHANGELOG_CATEGORIES = [
+    "Standards",
+    "DUTs",
+    "Procedures",
+    "Execution",
+    "Reports",
+    "Libraries",
+    "Settings",
+    "UI",
+    "Database",
+    "General",
+]
