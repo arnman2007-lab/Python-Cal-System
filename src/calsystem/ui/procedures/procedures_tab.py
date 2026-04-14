@@ -33,6 +33,7 @@ from PyQt6.QtWidgets import (
     QListWidgetItem,
     QTabWidget,
     QScrollArea,
+    QStackedWidget,
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QPixmap, QImage
@@ -50,15 +51,16 @@ from calsystem.instruments.visa_manager import get_visa_manager, PYVISA_AVAILABL
 
 
 class SectionEditDialog(QDialog):
-    """Dialog for editing section name and standard type."""
+    """Dialog for editing section name, standard type, and section command."""
 
-    def __init__(self, name: str = "", standard_type: str = "", parent=None):
+    def __init__(self, name: str = "", standard_type: str = "", section_command: str = "", parent=None):
         super().__init__(parent)
         self.setWindowTitle("Edit Section")
-        self.setMinimumWidth(400)
+        self.setMinimumWidth(450)
 
         self._name = name
         self._standard_type = standard_type
+        self._section_command = section_command
 
         layout = QVBoxLayout(self)
 
@@ -83,13 +85,18 @@ class SectionEditDialog(QDialog):
 
         form_layout.addRow("Standard Type:", self.type_combo)
 
+        # Section command - runs when entering this section
+        self.command_input = QLineEdit(section_command)
+        self.command_input.setPlaceholderText("e.g., STBY, *RST, or leave blank")
+        form_layout.addRow("Section Command:", self.command_input)
+
         layout.addLayout(form_layout)
 
         # Help text
         help_label = QLabel(
-            "The Standard Type determines which wiring diagram to show.\n"
-            "Example: Your section might be named 'AC Volts Test' but uses\n"
-            "the 'AC Voltage' standard type for diagram lookup."
+            "Standard Type: Determines which wiring diagram to show.\n"
+            "Section Command: Sent to calibrator when entering this section\n"
+            "(e.g., STBY to put in standby, *RST to reset). Runs before wiring diagram."
         )
         help_label.setStyleSheet("color: gray; font-size: 11px;")
         help_label.setWordWrap(True)
@@ -112,11 +119,12 @@ class SectionEditDialog(QDialog):
             return
         self._name = name
         self._standard_type = self.type_combo.currentData() or ""
+        self._section_command = self.command_input.text().strip()
         self.accept()
 
     def get_values(self) -> tuple:
-        """Returns (name, standard_type)."""
-        return self._name, self._standard_type
+        """Returns (name, standard_type, section_command)."""
+        return self._name, self._standard_type, self._section_command
 
 
 class WiringDiagramSelectionDialog(QDialog):
@@ -495,7 +503,13 @@ class ProceduresTab(QWidget):
 
         main_splitter.addWidget(structure_group)
 
-        # Right - Test point details with tabbed interface
+        # Right - Stacked widget for Section/Test Point details
+        self.details_stack = QStackedWidget()
+
+        # Page 0: Section details
+        self._create_section_details_panel()
+
+        # Page 1: Test point details with tabbed interface
         details_group = QGroupBox("Test Point Details")
         details_main_layout = QVBoxLayout(details_group)
 
@@ -549,12 +563,78 @@ class ProceduresTab(QWidget):
         bottom_layout.addLayout(test_btn_layout)
         details_main_layout.addLayout(bottom_layout)
 
-        main_splitter.addWidget(details_group)
+        self.details_stack.addWidget(details_group)  # Index 1: test point details
+
+        main_splitter.addWidget(self.details_stack)
 
         # Set splitter sizes
         main_splitter.setSizes([250, 350, 300])
 
         layout.addWidget(main_splitter)
+
+    def _create_section_details_panel(self):
+        """Create the section details panel (shown when a section is selected)."""
+        section_group = QGroupBox("Section Details")
+        section_layout = QVBoxLayout(section_group)
+
+        # Form for section properties
+        form_layout = QFormLayout()
+
+        # Section name
+        self.section_name_input = QLineEdit()
+        self.section_name_input.setPlaceholderText("e.g., AC Voltage Test")
+        form_layout.addRow("Section Name:", self.section_name_input)
+
+        # Standard type dropdown (for wiring diagram lookup)
+        self.section_type_combo = QComboBox()
+        self.section_type_combo.addItem("-- Select Standard Type --", "")
+        for section_type in get_all_section_types():
+            self.section_type_combo.addItem(section_type, section_type)
+        form_layout.addRow("Standard Type:", self.section_type_combo)
+
+        # Wiring diagram type override (optional, uses same types as standard)
+        self.section_wiring_combo = QComboBox()
+        self.section_wiring_combo.addItem("-- Use Standard Type --", "")
+        for section_type in get_all_section_types():
+            self.section_wiring_combo.addItem(section_type, section_type)
+        form_layout.addRow("Wiring Diagram:", self.section_wiring_combo)
+
+        # Section command
+        self.section_command_input = QLineEdit()
+        self.section_command_input.setPlaceholderText("e.g., STBY, *RST, or leave blank")
+        form_layout.addRow("Section Command:", self.section_command_input)
+
+        section_layout.addLayout(form_layout)
+
+        # Operator prompt (multi-line text)
+        section_layout.addWidget(QLabel("Operator Prompt:"))
+        self.section_prompt_input = QTextEdit()
+        self.section_prompt_input.setPlaceholderText("Instructions shown to technician when entering this section...")
+        self.section_prompt_input.setMaximumHeight(100)
+        section_layout.addWidget(self.section_prompt_input)
+
+        # Help text
+        help_label = QLabel(
+            "Standard Type: Categorizes the section for organization.\n"
+            "Wiring Diagram: Which diagram to show (defaults to Standard Type).\n"
+            "Section Command: Sent to calibrator when entering section.\n"
+            "Operator Prompt: Instructions shown before starting the section."
+        )
+        help_label.setStyleSheet("color: gray; font-size: 10px;")
+        help_label.setWordWrap(True)
+        section_layout.addWidget(help_label)
+
+        section_layout.addSpacing(5)
+
+        # Save button
+        self.save_section_btn = QPushButton("Save Section")
+        self.save_section_btn.clicked.connect(self._save_current_section)
+        section_layout.addWidget(self.save_section_btn)
+
+        section_layout.addStretch()
+
+        self.details_stack.addWidget(section_group)  # Index 0: section details
+        self._current_section_id = None  # Track which section is being edited
 
     def _create_basic_tab(self):
         """Create the Basic tab - test type, nominal, tolerance, measurement target."""
@@ -1938,13 +2018,14 @@ class ProceduresTab(QWidget):
 
                 current_name = section.name
                 current_type = section.standard_section_type or ""
+                current_command = section.section_command or ""
 
             # Show edit dialog
-            dialog = SectionEditDialog(current_name, current_type, self)
+            dialog = SectionEditDialog(current_name, current_type, current_command, self)
             if dialog.exec() != QDialog.DialogCode.Accepted:
                 return
 
-            name, standard_type = dialog.get_values()
+            name, standard_type, section_command = dialog.get_values()
 
             # Save changes
             with db.session() as session:
@@ -1952,6 +2033,7 @@ class ProceduresTab(QWidget):
                 if section:
                     section.name = name
                     section.standard_section_type = standard_type or None
+                    section.section_command = section_command or None
 
             # Update tree display - block signals to prevent itemChanged from firing
             self.structure_tree.blockSignals(True)
@@ -2133,8 +2215,12 @@ class ProceduresTab(QWidget):
 
         item_type, item_id = data
 
-        if item_type == "testpoint":
+        if item_type == "section":
+            self._load_section_details(item_id)
+            self.details_stack.setCurrentIndex(0)  # Show section details
+        elif item_type == "testpoint":
             self._load_testpoint_details(item_id)
+            self.details_stack.setCurrentIndex(1)  # Show test point details
 
     def _on_tree_item_changed(self, item: QTreeWidgetItem, column: int):
         """Handle tree item changes - saves section name edits."""
@@ -2176,6 +2262,97 @@ class ProceduresTab(QWidget):
                     logger.debug(f"Updated section name: {new_name}")
         except Exception as e:
             logger.error(f"Failed to update section name: {e}")
+
+    def _load_section_details(self, section_id: int):
+        """Load section details into the section form."""
+        self._current_section_id = section_id
+
+        db = get_db()
+        if not db.is_connected:
+            return
+
+        try:
+            with db.session() as session:
+                section = session.query(TestSection).filter(TestSection.id == section_id).first()
+                if not section:
+                    return
+
+                # Populate fields
+                self.section_name_input.setText(section.name or "")
+
+                # Set standard type combo
+                standard_type = section.standard_section_type or ""
+                idx = self.section_type_combo.findData(standard_type)
+                if idx >= 0:
+                    self.section_type_combo.setCurrentIndex(idx)
+                else:
+                    self.section_type_combo.setCurrentIndex(0)
+
+                # Set wiring diagram type combo
+                wiring_type = section.section_wiring_type or ""
+                idx = self.section_wiring_combo.findData(wiring_type)
+                if idx >= 0:
+                    self.section_wiring_combo.setCurrentIndex(idx)
+                else:
+                    self.section_wiring_combo.setCurrentIndex(0)
+
+                # Set section command
+                self.section_command_input.setText(section.section_command or "")
+
+                # Set operator prompt
+                self.section_prompt_input.setPlainText(section.section_prompt or "")
+
+        except Exception as e:
+            logger.error(f"Failed to load section details: {e}")
+
+    def _save_current_section(self):
+        """Save the current section details from the form."""
+        if not self._current_section_id:
+            QMessageBox.warning(self, "No Section", "No section selected to save.")
+            return
+
+        name = self.section_name_input.text().strip()
+        if not name:
+            QMessageBox.warning(self, "Required", "Please enter a section name.")
+            return
+
+        standard_type = self.section_type_combo.currentData() or None
+        wiring_type = self.section_wiring_combo.currentData() or None
+        section_command = self.section_command_input.text().strip() or None
+        section_prompt = self.section_prompt_input.toPlainText().strip() or None
+
+        db = get_db()
+        if not db.is_connected:
+            return
+
+        try:
+            with db.session() as session:
+                section = session.query(TestSection).filter(
+                    TestSection.id == self._current_section_id
+                ).first()
+                if section:
+                    section.name = name
+                    section.standard_section_type = standard_type
+                    section.section_wiring_type = wiring_type
+                    section.section_command = section_command
+                    section.section_prompt = section_prompt
+                    logger.info(f"Saved section {self._current_section_id}: {name}")
+
+            # Update tree display
+            current = self.structure_tree.currentItem()
+            if current:
+                display_text = name
+                if standard_type:
+                    display_text += f" [{standard_type}]"
+                self.structure_tree.blockSignals(True)
+                current.setText(0, display_text)
+                self.structure_tree.blockSignals(False)
+
+            QMessageBox.information(self, "Saved", "Section saved successfully.")
+
+        except Exception as e:
+            logger.error(f"Failed to save section: {e}")
+            QMessageBox.critical(self, "Error", f"Failed to save section: {e}")
 
     def _load_testpoint_details(self, tp_id: int):
         """Load test point details into the form."""

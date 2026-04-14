@@ -655,6 +655,35 @@ class ExecutionTab(QWidget):
 
         return success
 
+    def _execute_section_command(self, command: str):
+        """Execute a section command when entering a new section.
+
+        Tries to look up the command in the command bank first (for generic names
+        like STANDBY, RESET). If not found, sends the raw command string.
+        """
+        if not command:
+            return
+
+        address = self._get_calibrator_address()
+        if not address:
+            self.status_display.append(f"Section command: {command} (no calibrator connected)")
+            return
+
+        visa = get_visa_manager()
+
+        # Try to look up in command bank first (e.g., "STANDBY" -> "STBY")
+        actual_command = self._get_calibrator_command(command.upper())
+        if not actual_command:
+            # Not found in bank, use raw command
+            actual_command = command
+
+        self.status_display.append(f"Executing section command: {actual_command}")
+
+        if visa.write(address, actual_command):
+            self.status_display.append(f"Section command sent successfully")
+        else:
+            self.status_display.append(f"WARNING: Section command failed to send")
+
     def _safe_shutdown_calibrator(self):
         """Put calibrator into standby and reset for safe shutdown."""
         if not self._selected_calibrator:
@@ -1429,6 +1458,9 @@ class ExecutionTab(QWidget):
                             "section_id": section.id,
                             "section_name": section.name,
                             "standard_section_type": section.standard_section_type,
+                            "section_command": section.section_command,
+                            "section_prompt": section.section_prompt,
+                            "section_wiring_type": section.section_wiring_type,
                             "description": tp.description or f"{tp.nominal_value} {tp.unit}",
                             "nominal_value": tp.nominal_value,
                             "unit": tp.unit,
@@ -1578,6 +1610,9 @@ class ExecutionTab(QWidget):
                             "section_id": section.id,
                             "section_name": section.name,
                             "standard_section_type": section.standard_section_type,
+                            "section_command": section.section_command,
+                            "section_prompt": section.section_prompt,
+                            "section_wiring_type": section.section_wiring_type,
                             "description": tp.description or f"{tp.nominal_value} {tp.unit}",
                             "nominal_value": tp.nominal_value,
                             "unit": tp.unit,
@@ -1764,13 +1799,28 @@ class ExecutionTab(QWidget):
                 self._current_section_id = section_id
                 self.status_display.append("=" * 40)
                 self.status_display.append(f"NEW SECTION: {tp['section_name']}")
-                self.status_display.append("Check wiring diagram and confirm connections")
 
-                # Show wiring confirmation dialog
-                if not self._confirm_wiring(tp):
-                    # User cancelled - don't output
-                    self.status_display.append("Waiting for wiring confirmation...")
-                    return
+                # Execute section command if specified (before wiring dialog)
+                section_command = tp.get('section_command')
+                if section_command:
+                    self._execute_section_command(section_command)
+
+                # Show section prompt if specified
+                section_prompt = tp.get('section_prompt')
+                section_wiring_type = tp.get('section_wiring_type')
+
+                if section_prompt or section_wiring_type:
+                    # Show section instructions/wiring dialog
+                    if not self._confirm_section_instructions(tp, section_prompt, section_wiring_type):
+                        self.status_display.append("Waiting for section confirmation...")
+                        return
+                else:
+                    self.status_display.append("Check wiring diagram and confirm connections")
+                    # Show wiring confirmation dialog
+                    if not self._confirm_wiring(tp):
+                        # User cancelled - don't output
+                        self.status_display.append("Waiting for wiring confirmation...")
+                        return
 
             # Check for test point-specific instructions (prompt and/or wiring)
             tp_wiring_type = tp.get('wiring_diagram_type')
@@ -1804,6 +1854,57 @@ class ExecutionTab(QWidget):
 
             # Hide high voltage warning in manual mode
             self._hide_hv_warning()
+
+    def _confirm_section_instructions(
+        self,
+        tp: Dict[str, Any],
+        section_prompt: Optional[str],
+        section_wiring_type: Optional[str]
+    ) -> bool:
+        """Show section instructions and/or wiring diagram dialog.
+
+        Args:
+            tp: Test point data (contains section info)
+            section_prompt: Operator instructions for this section
+            section_wiring_type: Wiring diagram type to show
+
+        Returns:
+            True if user confirmed, False if cancelled
+        """
+        section_name = tp.get('section_name', 'Unknown')
+
+        # Load section wiring diagram if specified
+        if section_wiring_type:
+            self._load_testpoint_wiring_diagram(section_wiring_type)
+            self.status_display.append(f"Section wiring diagram: {section_wiring_type}")
+
+        # Build dialog message
+        msg = f"Entering section: {section_name}\n\n"
+
+        if section_prompt:
+            msg += f"Instructions:\n{section_prompt}\n\n"
+
+        if section_wiring_type:
+            msg += f"Wiring diagram type: {section_wiring_type}\n"
+            msg += "Please verify connections match the diagram.\n\n"
+
+        msg += "Click 'OK' when ready to proceed.\n"
+        msg += "Click 'Cancel' to pause."
+
+        reply = QMessageBox.question(
+            self,
+            "Section Instructions",
+            msg,
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Ok
+        )
+
+        if reply == QMessageBox.StandardButton.Ok:
+            self.status_display.append("Section confirmed - proceeding")
+            self._focus_reading_input()
+            return True
+        else:
+            return False
 
     def _confirm_wiring(self, tp: Dict[str, Any]) -> bool:
         """Show wiring confirmation dialog for new section."""

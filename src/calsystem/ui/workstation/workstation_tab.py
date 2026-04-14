@@ -270,9 +270,17 @@ class WorkstationTab(QWidget):
         self.ref_combo.setMinimumWidth(150)
         ref_layout.addWidget(self.ref_combo)
 
-        self.add_ref_btn = QPushButton("Add New Reference...")
+        self.add_ref_btn = QPushButton("Add New...")
         self.add_ref_btn.clicked.connect(self._on_add_reference)
         ref_layout.addWidget(self.add_ref_btn)
+
+        self.edit_ref_btn = QPushButton("Edit...")
+        self.edit_ref_btn.clicked.connect(self._on_edit_reference)
+        ref_layout.addWidget(self.edit_ref_btn)
+
+        self.delete_ref_btn = QPushButton("Delete")
+        self.delete_ref_btn.clicked.connect(self._on_delete_reference)
+        ref_layout.addWidget(self.delete_ref_btn)
 
         self.add_mapping_btn = QPushButton("Add to Mappings")
         self.add_mapping_btn.clicked.connect(self._on_add_mapping)
@@ -377,6 +385,136 @@ class WorkstationTab(QWidget):
         except Exception as e:
             logger.error(f"Failed to add reference: {e}")
             QMessageBox.critical(self, "Error", f"Failed to add:\n{e}")
+
+    def _on_edit_reference(self):
+        """Edit the selected command reference."""
+        ref_name = self.ref_combo.currentData()
+        if not ref_name:
+            QMessageBox.warning(self, "No Selection", "Please select a reference to edit.")
+            return
+
+        # Find reference data
+        ref_data = None
+        for ref in self._command_references:
+            if ref["name"] == ref_name:
+                ref_data = ref
+                break
+
+        if not ref_data:
+            return
+
+        # Edit name (only for custom references)
+        if ref_data["is_builtin"]:
+            new_name = ref_name  # Can't change built-in names
+        else:
+            new_name, ok = QInputDialog.getText(
+                self, "Edit Reference Name",
+                "Reference name:",
+                text=ref_name
+            )
+            if not ok:
+                return
+            new_name = new_name.strip()
+            if not new_name:
+                QMessageBox.warning(self, "Invalid", "Name cannot be empty.")
+                return
+
+        # Edit description
+        new_desc, ok = QInputDialog.getText(
+            self, "Edit Description",
+            "Description:",
+            text=ref_data["description"]
+        )
+        if not ok:
+            return
+
+        # Edit default command
+        new_cmd, ok = QInputDialog.getText(
+            self, "Edit Default Command",
+            "Default SCPI command (use {value}, {unit} placeholders):",
+            text=ref_data["default_command"]
+        )
+        if not ok:
+            return
+
+        db = get_db()
+        if not db.is_connected:
+            return
+
+        try:
+            with db.session() as session:
+                cmd_ref = session.query(CommandReference).filter(
+                    CommandReference.id == ref_data["id"]
+                ).first()
+
+                if cmd_ref:
+                    if not ref_data["is_builtin"]:
+                        cmd_ref.name = new_name
+                    cmd_ref.description = new_desc.strip()
+                    cmd_ref.default_command = new_cmd.strip()
+
+                    logger.info(f"Updated command reference: {new_name}")
+
+            self._load_command_references()
+            QMessageBox.information(self, "Updated", f"Reference '{new_name}' updated.")
+
+        except Exception as e:
+            logger.error(f"Failed to update reference: {e}")
+            QMessageBox.critical(self, "Error", f"Failed to update:\n{e}")
+
+    def _on_delete_reference(self):
+        """Delete a custom command reference."""
+        ref_name = self.ref_combo.currentData()
+        if not ref_name:
+            QMessageBox.warning(self, "No Selection", "Please select a reference to delete.")
+            return
+
+        # Find reference data
+        ref_data = None
+        for ref in self._command_references:
+            if ref["name"] == ref_name:
+                ref_data = ref
+                break
+
+        if not ref_data:
+            return
+
+        if ref_data["is_builtin"]:
+            QMessageBox.warning(
+                self, "Cannot Delete",
+                f"'{ref_name}' is a built-in reference and cannot be deleted."
+            )
+            return
+
+        reply = QMessageBox.question(
+            self, "Delete Reference",
+            f"Delete reference '{ref_name}'?\n\nThis will also remove it from any command banks using it.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        db = get_db()
+        if not db.is_connected:
+            return
+
+        try:
+            with db.session() as session:
+                cmd_ref = session.query(CommandReference).filter(
+                    CommandReference.id == ref_data["id"]
+                ).first()
+
+                if cmd_ref:
+                    session.delete(cmd_ref)
+                    logger.info(f"Deleted command reference: {ref_name}")
+
+            self._load_command_references()
+            QMessageBox.information(self, "Deleted", f"Reference '{ref_name}' deleted.")
+
+        except Exception as e:
+            logger.error(f"Failed to delete reference: {e}")
+            QMessageBox.critical(self, "Error", f"Failed to delete:\n{e}")
 
     def _on_add_mapping(self):
         """Add selected reference to the command mappings table."""

@@ -1,3 +1,26 @@
+# Calsystem Development Notes
+
+## Environment & Database
+
+**IMPORTANT:** This is a Windows application. Do NOT use WSL/Linux paths for data.
+
+- **Project location:** `C:\Users\paula\Desktop\Projects\Calsystem` (Windows path)
+- **Database location:** `C:\Users\paula\.calsystem\calsystem.db` (Windows user home)
+- **Config location:** `C:\Users\paula\.calsystem\config.json`
+
+When testing from WSL, always sync the database:
+```bash
+# Copy Windows DB to Linux for testing
+cp /mnt/c/Users/paula/.calsystem/calsystem.db ~/.calsystem/calsystem.db
+
+# After making changes, sync back to Windows
+cp ~/.calsystem/calsystem.db /mnt/c/Users/paula/.calsystem/calsystem.db
+```
+
+**Building for distribution:** Run the batch build file to create an exe for other technicians.
+
+---
+
 # Ralph Agent Instructions
 
 You are an autonomous coding agent working on a software project.

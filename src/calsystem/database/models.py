@@ -388,6 +388,16 @@ class TestSection(Base):
     # determines which library images to use
     standard_section_type = Column(String(50), nullable=True, comment="Standard type for diagram lookup")
 
+    # Command to execute when entering this section (e.g., STBY, *RST, etc.)
+    # Runs before showing wiring diagram and before any test points
+    section_command = Column(Text, nullable=True, comment="Command to run when entering section")
+
+    # Operator prompt - instructions shown when entering this section
+    section_prompt = Column(Text, nullable=True, comment="Instructions shown to tech when entering section")
+
+    # Wiring diagram type override - if set, shows this diagram type instead of standard_section_type
+    section_wiring_type = Column(String(100), nullable=True, comment="Library section_type for section wiring")
+
     # Relationships
     procedure = relationship("Procedure", back_populates="sections")
     test_points = relationship(
