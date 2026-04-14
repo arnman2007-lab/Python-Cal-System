@@ -130,6 +130,8 @@ class ChangelogTab(QWidget):
         self._categories: List[str] = DEFAULT_CHANGELOG_CATEGORIES.copy()
         self._entry_form_visible = False
         self._init_ui()
+        # Load changelog immediately to set current version
+        self._load_changelog()
 
     def _init_ui(self):
         """Initialize the UI."""

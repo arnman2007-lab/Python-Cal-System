@@ -21,6 +21,7 @@ from loguru import logger
 
 from calsystem.config.settings import get_settings
 from calsystem.database.connection import get_db
+from calsystem.database.models import ChangelogEntry
 
 
 class CalsystemApp(QMainWindow):
@@ -70,9 +71,34 @@ class CalsystemApp(QMainWindow):
         if connected:
             self.db_status_label.setText("Database: Connected")
             self.db_status_label.setStyleSheet("color: green;")
+            # Update window title with current version from changelog
+            self._update_window_title()
         else:
             self.db_status_label.setText("Database: Not Connected")
             self.db_status_label.setStyleSheet("color: red;")
+
+    def _get_current_version(self) -> str:
+        """Get the current version from the changelog database."""
+        db = get_db()
+        if not db.is_connected:
+            return "0.1.0"
+
+        try:
+            with db.session() as session:
+                latest = session.query(ChangelogEntry).order_by(
+                    ChangelogEntry.id.desc()
+                ).first()
+                if latest:
+                    return latest.version
+        except Exception as e:
+            logger.warning(f"Failed to get version from changelog: {e}")
+
+        return "0.1.0"
+
+    def _update_window_title(self):
+        """Update the window title with the current version."""
+        version = self._get_current_version()
+        self.setWindowTitle(f"Calsystem v{version} - Calibration Management System")
 
     def _init_menu_bar(self):
         """Initialize the menu bar."""
@@ -312,10 +338,11 @@ class CalsystemApp(QMainWindow):
 
     def _on_about(self):
         """Show about dialog."""
+        version = self._get_current_version()
         QMessageBox.about(
             self,
             "About Calsystem",
-            "Calsystem v0.1.0\n\n"
+            f"Calsystem v{version}\n\n"
             "Calibration Management System\n\n"
             "A comprehensive tool for managing calibration laboratory "
             "equipment, procedures, and reports.",

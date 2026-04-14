@@ -1103,6 +1103,11 @@ class ExecutionTab(QWidget):
         self.redo_btn.setEnabled(False)
         control_layout.addWidget(self.redo_btn)
 
+        self.test_section_btn = QPushButton("Test Section")
+        self.test_section_btn.setToolTip("Test section prompt and wiring diagram display")
+        self.test_section_btn.clicked.connect(self._on_test_section)
+        control_layout.addWidget(self.test_section_btn)
+
         control_layout.addStretch()
 
         # Terminate session button
@@ -1905,6 +1910,36 @@ class ExecutionTab(QWidget):
             return True
         else:
             return False
+
+    def _on_test_section(self):
+        """Test the section prompt and wiring diagram display for the current test point."""
+        row = self._current_test_index
+        if not self._test_points or row >= len(self._test_points):
+            QMessageBox.information(
+                self,
+                "No Test Point Selected",
+                "Please load a procedure and select a test point first."
+            )
+            return
+
+        tp = self._test_points[row]
+        section_name = tp.get('section_name', 'Unknown')
+        section_prompt = tp.get('section_prompt')
+        section_wiring_type = tp.get('section_wiring_type')
+
+        if not section_prompt and not section_wiring_type:
+            QMessageBox.information(
+                self,
+                "No Section Instructions",
+                f"Section '{section_name}' has no prompt or wiring diagram configured.\n\n"
+                "Edit the section in the Procedures tab to add:\n"
+                "  - Section Prompt (instructions for technician)\n"
+                "  - Section Wiring Type (wiring diagram to display)"
+            )
+            return
+
+        self.status_display.append(f"Testing section instructions for: {section_name}")
+        self._confirm_section_instructions(tp, section_prompt, section_wiring_type)
 
     def _confirm_wiring(self, tp: Dict[str, Any]) -> bool:
         """Show wiring confirmation dialog for new section."""
