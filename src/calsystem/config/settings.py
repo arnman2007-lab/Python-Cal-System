@@ -113,6 +113,10 @@ class Settings(BaseSettings):
     config_dir: Path = Field(default_factory=_get_config_dir)
     data_dir: Path = Field(default_factory=lambda: Path.home() / ".calsystem" / "data")
     log_dir: Path = Field(default_factory=lambda: Path.home() / ".calsystem" / "logs")
+    diagrams_dir: Path = Field(default_factory=lambda: Path.home() / ".calsystem" / "diagrams")
+
+    # Company info (for reports)
+    company_name: str = ""
 
     # User info
     technician_name: str = ""
@@ -120,6 +124,10 @@ class Settings(BaseSettings):
 
     # Workstation
     workstation_name: str = ""
+
+    # Update settings
+    update_server_path: str = ""  # Network path like \\\\server\\calsystem
+    check_updates_on_startup: bool = True
 
     def __init__(self, **kwargs):
         # Load config from file first
@@ -137,7 +145,8 @@ class Settings(BaseSettings):
             kwargs["ui"] = UISettings(**file_config["ui"])
 
         # Load top-level settings from file
-        for key in ["technician_name", "technician_id", "workstation_name"]:
+        for key in ["company_name", "technician_name", "technician_id", "workstation_name",
+                    "update_server_path", "check_updates_on_startup"]:
             if key not in kwargs and key in file_config:
                 kwargs[key] = file_config[key]
 
@@ -146,6 +155,7 @@ class Settings(BaseSettings):
         self.config_dir.mkdir(parents=True, exist_ok=True)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.log_dir.mkdir(parents=True, exist_ok=True)
+        self.diagrams_dir.mkdir(parents=True, exist_ok=True)
 
 
 @lru_cache
@@ -194,9 +204,12 @@ def save_settings(settings: Settings) -> bool:
                 "show_tooltips": settings.ui.show_tooltips,
                 "high_voltage_blink_speed_ms": settings.ui.high_voltage_blink_speed_ms,
             },
+            "company_name": settings.company_name,
             "technician_name": settings.technician_name,
             "technician_id": settings.technician_id,
             "workstation_name": settings.workstation_name,
+            "update_server_path": settings.update_server_path,
+            "check_updates_on_startup": settings.check_updates_on_startup,
         }
 
         config_file.write_text(json.dumps(config, indent=2))

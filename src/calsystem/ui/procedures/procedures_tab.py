@@ -2,6 +2,7 @@
 Procedure builder tab.
 """
 
+import os
 import re
 import time
 from typing import Optional, Dict, Any, List
@@ -25,6 +26,7 @@ from PyQt6.QtWidgets import (
     QFormLayout,
     QComboBox,
     QDoubleSpinBox,
+    QSpinBox,
     QMessageBox,
     QFileDialog,
     QDialog,
@@ -301,6 +303,7 @@ class WiringDiagramSelectionDialog(QDialog):
                         "dut_model": diag.dut_model,
                         "section_name": diag.section_name,
                         "filename": diag.filename,
+                        "image_path": diag.image_path,
                         "image_data": diag.image_data,
                         "mime_type": diag.mime_type,
                     })
@@ -327,21 +330,29 @@ class WiringDiagramSelectionDialog(QDialog):
         diag = self._diagrams[idx]
         self._selected = diag
 
-        # Show preview
-        if diag.get("image_data"):
+        # Show preview - try file path first, fall back to BLOB
+        pixmap = None
+
+        # Try loading from file path first (new method)
+        if diag.get("image_path") and os.path.exists(diag["image_path"]):
+            pixmap = QPixmap(diag["image_path"])
+            if pixmap.isNull():
+                pixmap = None
+
+        # Fall back to BLOB data (legacy method)
+        if pixmap is None and diag.get("image_data"):
             image = QImage()
             image.loadFromData(diag["image_data"])
-
             if not image.isNull():
                 pixmap = QPixmap.fromImage(image)
-                scaled = pixmap.scaled(
-                    self.preview_label.size(),
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation
-                )
-                self.preview_label.setPixmap(scaled)
-            else:
-                self.preview_label.setText("Failed to load image")
+
+        if pixmap and not pixmap.isNull():
+            scaled = pixmap.scaled(
+                self.preview_label.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            )
+            self.preview_label.setPixmap(scaled)
         else:
             self.preview_label.setText("No image data")
 
@@ -717,17 +728,107 @@ class ProceduresTab(QWidget):
         freq_layout.addWidget(self.freq_unit_combo)
         basic_layout.addRow("Frequency:", freq_layout)
 
-        # Tolerance
-        tol_layout = QHBoxLayout()
+        # Tolerance (multi-component specification)
+        # Keep legacy inputs hidden for backward compatibility
         self.tolerance_input = QDoubleSpinBox()
         self.tolerance_input.setRange(0, 999999)
         self.tolerance_input.setDecimals(6)
-        tol_layout.addWidget(self.tolerance_input)
-
+        self.tolerance_input.setVisible(False)
         self.tolerance_type_combo = QComboBox()
         self.tolerance_type_combo.addItems(["%", "Absolute", "PPM"])
-        tol_layout.addWidget(self.tolerance_type_combo)
-        basic_layout.addRow("Tolerance:", tol_layout)
+        self.tolerance_type_combo.setVisible(False)
+
+        # Multi-component tolerance group
+        tol_group = QGroupBox("Tolerance Specification")
+        tol_group_layout = QFormLayout(tol_group)
+        tol_group_layout.setSpacing(5)
+
+        # % of Reading
+        pct_rdg_layout = QHBoxLayout()
+        self.tol_pct_reading_input = QDoubleSpinBox()
+        self.tol_pct_reading_input.setRange(0, 100)
+        self.tol_pct_reading_input.setDecimals(6)
+        self.tol_pct_reading_input.setSuffix(" %")
+        self.tol_pct_reading_input.setToolTip("Percentage of the reading/nominal value")
+        self.tol_pct_reading_input.valueChanged.connect(self._update_tolerance_preview)
+        pct_rdg_layout.addWidget(self.tol_pct_reading_input)
+        pct_rdg_layout.addWidget(QLabel("of reading"))
+        pct_rdg_layout.addStretch()
+        tol_group_layout.addRow("% Reading:", pct_rdg_layout)
+
+        # % of Range/Full Scale
+        pct_range_layout = QHBoxLayout()
+        self.tol_pct_range_input = QDoubleSpinBox()
+        self.tol_pct_range_input.setRange(0, 100)
+        self.tol_pct_range_input.setDecimals(6)
+        self.tol_pct_range_input.setSuffix(" %")
+        self.tol_pct_range_input.setToolTip("Percentage of the full scale/range value")
+        self.tol_pct_range_input.valueChanged.connect(self._update_tolerance_preview)
+        pct_range_layout.addWidget(self.tol_pct_range_input)
+        pct_range_layout.addWidget(QLabel("of Range:"))
+        self.tol_range_value_input = QDoubleSpinBox()
+        self.tol_range_value_input.setRange(0, 999999999)
+        self.tol_range_value_input.setDecimals(6)
+        self.tol_range_value_input.setToolTip("Full scale/range reference value")
+        self.tol_range_value_input.valueChanged.connect(self._update_tolerance_preview)
+        pct_range_layout.addWidget(self.tol_range_value_input)
+        pct_range_layout.addStretch()
+        tol_group_layout.addRow("% Range:", pct_range_layout)
+
+        # % of Span (for 4-20mA and similar)
+        pct_span_layout = QHBoxLayout()
+        self.tol_pct_span_input = QDoubleSpinBox()
+        self.tol_pct_span_input.setRange(0, 100)
+        self.tol_pct_span_input.setDecimals(6)
+        self.tol_pct_span_input.setSuffix(" %")
+        self.tol_pct_span_input.setToolTip("Percentage of the span value (e.g., for 4-20mA, span = 16mA)")
+        self.tol_pct_span_input.valueChanged.connect(self._update_tolerance_preview)
+        pct_span_layout.addWidget(self.tol_pct_span_input)
+        pct_span_layout.addWidget(QLabel("of Span:"))
+        self.tol_span_value_input = QDoubleSpinBox()
+        self.tol_span_value_input.setRange(0, 999999999)
+        self.tol_span_value_input.setDecimals(6)
+        self.tol_span_value_input.setToolTip("Span reference value (e.g., 16 for 4-20mA)")
+        self.tol_span_value_input.valueChanged.connect(self._update_tolerance_preview)
+        pct_span_layout.addWidget(self.tol_span_value_input)
+        pct_span_layout.addStretch()
+        tol_group_layout.addRow("% Span:", pct_span_layout)
+
+        # Digits (floor)
+        digits_layout = QHBoxLayout()
+        self.tol_digits_input = QSpinBox()
+        self.tol_digits_input.setRange(0, 100)
+        self.tol_digits_input.setToolTip("Number of digits for floor value")
+        self.tol_digits_input.valueChanged.connect(self._update_tolerance_preview)
+        digits_layout.addWidget(self.tol_digits_input)
+        digits_layout.addWidget(QLabel("digits @ Decimal Places:"))
+        self.tol_decimal_places_input = QSpinBox()
+        self.tol_decimal_places_input.setRange(0, 9)
+        self.tol_decimal_places_input.setToolTip("Number of decimal places on DUT display (e.g., 3 for 100.000)")
+        self.tol_decimal_places_input.valueChanged.connect(self._update_tolerance_preview)
+        digits_layout.addWidget(self.tol_decimal_places_input)
+        digits_layout.addStretch()
+        tol_group_layout.addRow("Digits:", digits_layout)
+
+        # Absolute tolerance
+        abs_layout = QHBoxLayout()
+        self.tol_absolute_input = QDoubleSpinBox()
+        self.tol_absolute_input.setRange(0, 999999999)
+        self.tol_absolute_input.setDecimals(9)
+        self.tol_absolute_input.setToolTip("Absolute tolerance value in measurement units")
+        self.tol_absolute_input.valueChanged.connect(self._update_tolerance_preview)
+        abs_layout.addWidget(self.tol_absolute_input)
+        self.tol_absolute_unit_label = QLabel("")
+        abs_layout.addWidget(self.tol_absolute_unit_label)
+        abs_layout.addStretch()
+        tol_group_layout.addRow("Absolute:", abs_layout)
+
+        # Tolerance preview/summary
+        self.tol_preview_label = QLabel("Tolerance: ±0")
+        self.tol_preview_label.setStyleSheet("font-weight: bold; color: #2196F3;")
+        tol_group_layout.addRow("Summary:", self.tol_preview_label)
+
+        basic_layout.addRow(tol_group)
 
         # Measurement target
         basic_layout.addRow(QLabel(""))  # Spacer
@@ -754,6 +855,16 @@ class ProceduresTab(QWidget):
         self.expected_unit_combo.addItems(["V", "mV", "µV", "A", "mA", "µA", "Ohm", "kOhm", "MOhm", "Hz", "kHz", "MHz"])
         self.expected_unit_combo.setVisible(False)
         measure_layout.addWidget(self.expected_unit_combo)
+
+        # Connect signals for tolerance preview updates
+        # These inputs affect the tolerance calculation
+        self.nominal_input.valueChanged.connect(self._update_tolerance_preview)
+        self.unit_combo.currentTextChanged.connect(self._update_tolerance_preview)
+        self.frequency_input.valueChanged.connect(self._update_tolerance_preview)
+        self.freq_unit_combo.currentTextChanged.connect(self._update_tolerance_preview)
+        self.measurement_target_combo.currentTextChanged.connect(self._update_tolerance_preview)
+        self.expected_value_input.valueChanged.connect(self._update_tolerance_preview)
+        self.expected_unit_combo.currentTextChanged.connect(self._update_tolerance_preview)
 
         basic_layout.addRow("Measure:", measure_layout)
 
@@ -1613,6 +1724,53 @@ class ProceduresTab(QWidget):
         self.expected_value_input.setVisible(is_custom)
         self.expected_unit_combo.setVisible(is_custom)
 
+    def _update_tolerance_preview(self):
+        """Update the tolerance preview label with calculated tolerance."""
+        from calsystem.utils.tolerance import ToleranceSpec
+
+        # Determine which value to use based on measurement target
+        measurement_target = self.measurement_target_combo.currentText()
+        if measurement_target == "Frequency":
+            reading_value = self.frequency_input.value()
+            unit = self.freq_unit_combo.currentText()
+        elif measurement_target == "Custom":
+            reading_value = self.expected_value_input.value()
+            unit = self.expected_unit_combo.currentText()
+        else:  # "Primary Value"
+            reading_value = self.nominal_input.value()
+            unit = self.unit_combo.currentText()
+
+        # Convert decimal places to resolution (e.g., 3 -> 0.001)
+        decimal_places = self.tol_decimal_places_input.value()
+        resolution = 10 ** (-decimal_places) if decimal_places > 0 else 0
+
+        # Build tolerance spec from inputs
+        spec = ToleranceSpec(
+            pct_reading=self.tol_pct_reading_input.value(),
+            pct_range=self.tol_pct_range_input.value(),
+            pct_span=self.tol_pct_span_input.value(),
+            digits=self.tol_digits_input.value(),
+            absolute=self.tol_absolute_input.value(),
+            resolution=resolution,
+            range_value=self.tol_range_value_input.value(),
+            span_value=self.tol_span_value_input.value(),
+        )
+
+        # Update absolute unit label
+        self.tol_absolute_unit_label.setText(unit)
+
+        # Format the specification
+        spec_str = spec.format_spec()
+
+        # Calculate actual tolerance at current reading value
+        if not spec.is_empty():
+            calculated = spec.calculate(reading_value)
+            preview = f"{spec_str} = ±{calculated:g} {unit}"
+        else:
+            preview = "No tolerance specified"
+
+        self.tol_preview_label.setText(preview)
+
     def _load_command_templates(self):
         """Load available command bank templates into dropdown."""
         self.cmd_template_combo.clear()
@@ -1965,7 +2123,24 @@ class ProceduresTab(QWidget):
                                     nominal_str += f" @ {tp.frequency} {tp.frequency_unit or 'Hz'}"
                                 tp_item.setText(0, tp.description or nominal_str)
                                 tp_item.setText(1, nominal_str)
-                                tp_item.setText(2, f"±{tp.tolerance_value or 0}{tp.tolerance_type.value if tp.tolerance_type else '%'}")
+                                # Format tolerance using multi-component spec
+                                from calsystem.utils.tolerance import ToleranceSpec
+                                tol_spec = ToleranceSpec(
+                                    pct_reading=tp.tol_pct_reading or 0,
+                                    pct_range=tp.tol_pct_range or 0,
+                                    pct_span=tp.tol_pct_span or 0,
+                                    digits=tp.tol_digits or 0,
+                                    absolute=tp.tol_absolute or 0,
+                                    resolution=tp.tol_resolution or 0,
+                                    range_value=tp.tol_range_value or 0,
+                                    span_value=tp.tol_span_value or 0,
+                                )
+                                if tol_spec.is_empty():
+                                    tol_spec = ToleranceSpec.from_legacy(
+                                        tp.tolerance_value or 0,
+                                        tp.tolerance_type.value if tp.tolerance_type else "percent"
+                                    )
+                                tp_item.setText(2, tol_spec.format_spec())
 
                             tp_item.setData(0, Qt.ItemDataRole.UserRole, ("testpoint", tp.id))
 
@@ -2528,6 +2703,7 @@ class ProceduresTab(QWidget):
 
         # Load wiring diagram image if specified
         wiring_image = None
+        wiring_image_path = None
         if wiring_type:
             db = get_db()
             if db.is_connected:
@@ -2536,8 +2712,12 @@ class ProceduresTab(QWidget):
                         diagram = session.query(WiringDiagramLibrary).filter(
                             WiringDiagramLibrary.section_name == wiring_type
                         ).first()
-                        if diagram and diagram.image_data:
-                            wiring_image = diagram.image_data
+                        if diagram:
+                            # Try file path first, fall back to BLOB
+                            if diagram.image_path and os.path.exists(diagram.image_path):
+                                wiring_image_path = diagram.image_path
+                            elif diagram.image_data:
+                                wiring_image = diagram.image_data
                 except Exception as e:
                     logger.warning(f"Failed to load wiring diagram: {e}")
 
@@ -2561,14 +2741,23 @@ class ProceduresTab(QWidget):
         layout.addSpacing(10)
 
         # Wiring diagram (if any)
-        if wiring_image:
+        if wiring_image or wiring_image_path:
             wiring_group = QGroupBox("Wiring Diagram")
             wiring_layout = QVBoxLayout(wiring_group)
 
             image_label = QLabel()
-            pixmap = QPixmap()
-            pixmap.loadFromData(wiring_image)
-            if not pixmap.isNull():
+            pixmap = None
+
+            # Try file path first, then BLOB
+            if wiring_image_path:
+                pixmap = QPixmap(wiring_image_path)
+                if pixmap.isNull():
+                    pixmap = None
+            if pixmap is None and wiring_image:
+                pixmap = QPixmap()
+                pixmap.loadFromData(wiring_image)
+
+            if pixmap and not pixmap.isNull():
                 scaled = pixmap.scaled(450, 300, Qt.AspectRatioMode.KeepAspectRatio,
                                        Qt.TransformationMode.SmoothTransformation)
                 image_label.setPixmap(scaled)
@@ -2769,12 +2958,32 @@ class ProceduresTab(QWidget):
                 else:
                     self.freq_unit_combo.setCurrentIndex(0)  # Default to Hz
 
-                # Tolerance
+                # Tolerance (legacy fields - kept for backward compatibility)
                 self.tolerance_input.setValue(tp.tolerance_value or 0)
                 tol_map = {"percent": 0, "absolute": 1, "ppm": 2}
                 self.tolerance_type_combo.setCurrentIndex(
                     tol_map.get(tp.tolerance_type.value if tp.tolerance_type else "percent", 0)
                 )
+
+                # Multi-component tolerance fields
+                self.tol_pct_reading_input.setValue(tp.tol_pct_reading or 0)
+                self.tol_pct_range_input.setValue(tp.tol_pct_range or 0)
+                self.tol_range_value_input.setValue(tp.tol_range_value or 0)
+                self.tol_pct_span_input.setValue(tp.tol_pct_span or 0)
+                self.tol_span_value_input.setValue(tp.tol_span_value or 0)
+                self.tol_digits_input.setValue(int(tp.tol_digits or 0))
+                # Convert resolution to decimal places (e.g., 0.001 -> 3)
+                resolution = tp.tol_resolution or 0
+                if resolution > 0:
+                    import math
+                    decimal_places = max(0, int(round(-math.log10(resolution))))
+                else:
+                    decimal_places = 0
+                self.tol_decimal_places_input.setValue(decimal_places)
+                self.tol_absolute_input.setValue(tp.tol_absolute or 0)
+
+                # Update tolerance preview
+                self._update_tolerance_preview()
 
                 # Pass/Fail prompt and range
                 self.pass_fail_prompt_input.setText(tp.pass_fail_prompt or "")
@@ -2901,6 +3110,27 @@ class ProceduresTab(QWidget):
                 tol_map = {0: "percent", 1: "absolute", 2: "ppm"}
                 tp.tolerance_type = ToleranceType(tol_map[self.tolerance_type_combo.currentIndex()])
 
+                # Multi-component tolerance fields
+                tp.tol_pct_reading = self.tol_pct_reading_input.value() or None
+                tp.tol_pct_range = self.tol_pct_range_input.value() or None
+                tp.tol_range_value = self.tol_range_value_input.value() or None
+                tp.tol_pct_span = self.tol_pct_span_input.value() or None
+                tp.tol_span_value = self.tol_span_value_input.value() or None
+                tp.tol_digits = self.tol_digits_input.value() or None
+                # Convert decimal places to resolution (e.g., 3 -> 0.001)
+                decimal_places = self.tol_decimal_places_input.value()
+                tp.tol_resolution = (10 ** (-decimal_places)) if decimal_places > 0 else None
+                tp.tol_absolute = self.tol_absolute_input.value() or None
+
+                # Sync legacy tolerance field from new fields for backward compatibility
+                # Use % reading as the primary legacy value if set
+                if self.tol_pct_reading_input.value() > 0:
+                    tp.tolerance_value = self.tol_pct_reading_input.value()
+                    tp.tolerance_type = ToleranceType.PERCENT
+                elif self.tol_absolute_input.value() > 0:
+                    tp.tolerance_value = self.tol_absolute_input.value()
+                    tp.tolerance_type = ToleranceType.ABSOLUTE
+
                 # Pass/Fail prompt and range
                 tp.pass_fail_prompt = self.pass_fail_prompt_input.toPlainText().strip() or None
                 # Only save range if values are set (not at minimum/special value)
@@ -2992,7 +3222,24 @@ class ProceduresTab(QWidget):
                         nominal_str += f" @ {tp.frequency} {tp.frequency_unit}"
                     current.setText(0, tp.description or nominal_str)
                     current.setText(1, nominal_str)
-                    current.setText(2, f"±{tp.tolerance_value}{tp.tolerance_type.value}")
+                    # Format tolerance using multi-component spec
+                    from calsystem.utils.tolerance import ToleranceSpec
+                    tol_spec = ToleranceSpec(
+                        pct_reading=tp.tol_pct_reading or 0,
+                        pct_range=tp.tol_pct_range or 0,
+                        pct_span=tp.tol_pct_span or 0,
+                        digits=tp.tol_digits or 0,
+                        absolute=tp.tol_absolute or 0,
+                        resolution=tp.tol_resolution or 0,
+                        range_value=tp.tol_range_value or 0,
+                        span_value=tp.tol_span_value or 0,
+                    )
+                    if tol_spec.is_empty():
+                        tol_spec = ToleranceSpec.from_legacy(
+                            tp.tolerance_value or 0,
+                            tp.tolerance_type.value if tp.tolerance_type else "percent"
+                        )
+                    current.setText(2, tol_spec.format_spec())
 
                 logger.info(f"Saved test point: {tp_id}")
 
@@ -3921,6 +4168,7 @@ class ProceduresTab(QWidget):
         # Get wiring diagram (from Advanced tab)
         wiring_type = self.wiring_combo.currentText()
         wiring_image = None
+        wiring_image_path = None
 
         if wiring_type and wiring_type != "None" and not wiring_type.startswith("--"):
             # Try to load the wiring diagram image from library
@@ -3933,8 +4181,12 @@ class ProceduresTab(QWidget):
                             WiringDiagramLibrary.section_name == wiring_type
                         ).first()
 
-                        if diagram and diagram.image_data:
-                            wiring_image = diagram.image_data
+                        if diagram:
+                            # Try file path first, fall back to BLOB
+                            if diagram.image_path and os.path.exists(diagram.image_path):
+                                wiring_image_path = diagram.image_path
+                            elif diagram.image_data:
+                                wiring_image = diagram.image_data
                 except Exception as e:
                     logger.warning(f"Failed to load wiring diagram: {e}")
 
@@ -3958,14 +4210,23 @@ class ProceduresTab(QWidget):
         layout.addSpacing(10)
 
         # Wiring diagram (if any)
-        if wiring_image:
+        if wiring_image or wiring_image_path:
             wiring_group = QGroupBox("Wiring Diagram")
             wiring_layout = QVBoxLayout(wiring_group)
 
             image_label = QLabel()
-            pixmap = QPixmap()
-            pixmap.loadFromData(wiring_image)
-            if not pixmap.isNull():
+            pixmap = None
+
+            # Try file path first, then BLOB
+            if wiring_image_path:
+                pixmap = QPixmap(wiring_image_path)
+                if pixmap.isNull():
+                    pixmap = None
+            if pixmap is None and wiring_image:
+                pixmap = QPixmap()
+                pixmap.loadFromData(wiring_image)
+
+            if pixmap and not pixmap.isNull():
                 # Scale to fit
                 scaled = pixmap.scaled(450, 300, Qt.AspectRatioMode.KeepAspectRatio,
                                        Qt.TransformationMode.SmoothTransformation)
@@ -4035,6 +4296,7 @@ class ProceduresTab(QWidget):
         # ========== STEP 1: Show Wiring Diagram (if configured) ==========
         wiring_type = self.wiring_combo.currentText()
         wiring_image = None
+        wiring_image_path = None
 
         if wiring_type and wiring_type != "None" and not wiring_type.startswith("--"):
             db = get_db()
@@ -4044,12 +4306,16 @@ class ProceduresTab(QWidget):
                         diagram = session.query(WiringDiagramLibrary).filter(
                             WiringDiagramLibrary.section_name == wiring_type
                         ).first()
-                        if diagram and diagram.image_data:
-                            wiring_image = diagram.image_data
+                        if diagram:
+                            # Try file path first, fall back to BLOB
+                            if diagram.image_path and os.path.exists(diagram.image_path):
+                                wiring_image_path = diagram.image_path
+                            elif diagram.image_data:
+                                wiring_image = diagram.image_data
                 except Exception as e:
                     logger.warning(f"Failed to load wiring diagram: {e}")
 
-            if wiring_image:
+            if wiring_image or wiring_image_path:
                 # Show wiring diagram dialog first
                 wiring_dialog = QDialog(self)
                 wiring_dialog.setWindowTitle("Wiring Setup")
@@ -4061,9 +4327,18 @@ class ProceduresTab(QWidget):
                 wiring_layout.addWidget(title)
 
                 image_label = QLabel()
-                pixmap = QPixmap()
-                pixmap.loadFromData(wiring_image)
-                if not pixmap.isNull():
+                pixmap = None
+
+                # Try file path first, then BLOB
+                if wiring_image_path:
+                    pixmap = QPixmap(wiring_image_path)
+                    if pixmap.isNull():
+                        pixmap = None
+                if pixmap is None and wiring_image:
+                    pixmap = QPixmap()
+                    pixmap.loadFromData(wiring_image)
+
+                if pixmap and not pixmap.isNull():
                     scaled = pixmap.scaled(450, 350, Qt.AspectRatioMode.KeepAspectRatio,
                                            Qt.TransformationMode.SmoothTransformation)
                     image_label.setPixmap(scaled)
@@ -4314,11 +4589,20 @@ class ProceduresTab(QWidget):
             layout.addWidget(cal_label)
 
         # Wiring diagram inline (smaller, if available)
-        if wiring_image:
+        if wiring_image or wiring_image_path:
             image_label = QLabel()
-            pixmap = QPixmap()
-            pixmap.loadFromData(wiring_image)
-            if not pixmap.isNull():
+            pixmap = None
+
+            # Try file path first, then BLOB
+            if wiring_image_path:
+                pixmap = QPixmap(wiring_image_path)
+                if pixmap.isNull():
+                    pixmap = None
+            if pixmap is None and wiring_image:
+                pixmap = QPixmap()
+                pixmap.loadFromData(wiring_image)
+
+            if pixmap and not pixmap.isNull():
                 scaled = pixmap.scaled(300, 200, Qt.AspectRatioMode.KeepAspectRatio,
                                        Qt.TransformationMode.SmoothTransformation)
                 image_label.setPixmap(scaled)

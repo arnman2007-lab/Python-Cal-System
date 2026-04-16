@@ -213,6 +213,92 @@ class DatabaseManager:
                         conn.execute(text("ALTER TABLE test_points ADD COLUMN pre_conditioning_steps TEXT"))
                         conn.commit()
                         logger.info("Added pre_conditioning_steps column to test_points")
+
+                    # Multi-component tolerance columns for test_points
+                    tol_columns = [
+                        ('tol_pct_reading', 'FLOAT DEFAULT 0'),
+                        ('tol_pct_range', 'FLOAT DEFAULT 0'),
+                        ('tol_pct_span', 'FLOAT DEFAULT 0'),
+                        ('tol_digits', 'FLOAT DEFAULT 0'),
+                        ('tol_absolute', 'FLOAT DEFAULT 0'),
+                        ('tol_resolution', 'FLOAT'),
+                        ('tol_range_value', 'FLOAT'),
+                        ('tol_span_value', 'FLOAT'),
+                    ]
+                    for col_name, col_type in tol_columns:
+                        if col_name not in columns:
+                            conn.execute(text(f"ALTER TABLE test_points ADD COLUMN {col_name} {col_type}"))
+                            conn.commit()
+                            logger.info(f"Added {col_name} column to test_points")
+
+                    # Migrate existing tolerance data to new format
+                    # percent -> tol_pct_reading, absolute -> tol_absolute
+                    if 'tol_pct_reading' in columns or 'tol_pct_reading' not in columns:
+                        conn.execute(text("""
+                            UPDATE test_points
+                            SET tol_pct_reading = tolerance_value
+                            WHERE tolerance_type = 'percent'
+                            AND (tol_pct_reading IS NULL OR tol_pct_reading = 0)
+                            AND tolerance_value IS NOT NULL AND tolerance_value > 0
+                        """))
+                        conn.execute(text("""
+                            UPDATE test_points
+                            SET tol_absolute = tolerance_value
+                            WHERE tolerance_type = 'absolute'
+                            AND (tol_absolute IS NULL OR tol_absolute = 0)
+                            AND tolerance_value IS NOT NULL AND tolerance_value > 0
+                        """))
+                        conn.execute(text("""
+                            UPDATE test_points
+                            SET tol_pct_reading = tolerance_value / 10000.0
+                            WHERE tolerance_type = 'ppm'
+                            AND (tol_pct_reading IS NULL OR tol_pct_reading = 0)
+                            AND tolerance_value IS NOT NULL AND tolerance_value > 0
+                        """))
+                        conn.commit()
+
+                    # Multi-component tolerance columns for test_results
+                    result = conn.execute(text("PRAGMA table_info(test_results)"))
+                    result_columns = [row[1] for row in result.fetchall()]
+                    result_tol_columns = [
+                        ('tol_pct_reading', 'FLOAT'),
+                        ('tol_pct_range', 'FLOAT'),
+                        ('tol_pct_span', 'FLOAT'),
+                        ('tol_digits', 'FLOAT'),
+                        ('tol_absolute', 'FLOAT'),
+                        ('tol_resolution', 'FLOAT'),
+                        ('tol_range_value', 'FLOAT'),
+                        ('tol_span_value', 'FLOAT'),
+                        ('calculated_tolerance', 'FLOAT'),
+                    ]
+                    for col_name, col_type in result_tol_columns:
+                        if col_name not in result_columns:
+                            conn.execute(text(f"ALTER TABLE test_results ADD COLUMN {col_name} {col_type}"))
+                            conn.commit()
+                            logger.info(f"Added {col_name} column to test_results")
+
+                    # Check is_published column in changelog_entries
+                    result = conn.execute(text("PRAGMA table_info(changelog_entries)"))
+                    columns = [row[1] for row in result.fetchall()]
+                    if 'is_published' not in columns:
+                        conn.execute(text("ALTER TABLE changelog_entries ADD COLUMN is_published BOOLEAN DEFAULT 0"))
+                        conn.commit()
+                        # Mark all existing entries as published
+                        conn.execute(text("UPDATE changelog_entries SET is_published = 1 WHERE version IS NOT NULL"))
+                        conn.commit()
+                        logger.info("Added is_published column to changelog_entries")
+
+                    # Check customer fields in duts table
+                    result = conn.execute(text("PRAGMA table_info(duts)"))
+                    dut_columns = [row[1] for row in result.fetchall()]
+                    if 'customer_id' not in dut_columns:
+                        conn.execute(text("ALTER TABLE duts ADD COLUMN customer_id VARCHAR(100)"))
+                        conn.commit()
+                        logger.info("Added customer_id column to duts")
+                    if 'customer_serial' not in dut_columns:
+                        conn.execute(text("ALTER TABLE duts ADD COLUMN customer_serial VARCHAR(100)"))
+                        conn.commit()
+                        logger.info("Added customer_serial column to duts")
                 else:
                     # MySQL migrations
                     # Check is_active column
@@ -331,6 +417,104 @@ class DatabaseManager:
                         conn.execute(text("ALTER TABLE test_points ADD COLUMN pre_conditioning_steps JSON"))
                         conn.commit()
                         logger.info("Added pre_conditioning_steps column to test_points")
+
+                    # Multi-component tolerance columns for test_points (MySQL)
+                    mysql_tol_columns = [
+                        ('tol_pct_reading', 'FLOAT DEFAULT 0'),
+                        ('tol_pct_range', 'FLOAT DEFAULT 0'),
+                        ('tol_pct_span', 'FLOAT DEFAULT 0'),
+                        ('tol_digits', 'FLOAT DEFAULT 0'),
+                        ('tol_absolute', 'FLOAT DEFAULT 0'),
+                        ('tol_resolution', 'FLOAT'),
+                        ('tol_range_value', 'FLOAT'),
+                        ('tol_span_value', 'FLOAT'),
+                    ]
+                    for col_name, col_type in mysql_tol_columns:
+                        result = conn.execute(text(
+                            f"SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                            f"WHERE TABLE_NAME = 'test_points' AND COLUMN_NAME = '{col_name}'"
+                        ))
+                        if not result.fetchone():
+                            conn.execute(text(f"ALTER TABLE test_points ADD COLUMN {col_name} {col_type}"))
+                            conn.commit()
+                            logger.info(f"Added {col_name} column to test_points")
+
+                    # Migrate existing tolerance data to new format (MySQL)
+                    conn.execute(text("""
+                        UPDATE test_points
+                        SET tol_pct_reading = tolerance_value
+                        WHERE tolerance_type = 'percent'
+                        AND (tol_pct_reading IS NULL OR tol_pct_reading = 0)
+                        AND tolerance_value IS NOT NULL AND tolerance_value > 0
+                    """))
+                    conn.execute(text("""
+                        UPDATE test_points
+                        SET tol_absolute = tolerance_value
+                        WHERE tolerance_type = 'absolute'
+                        AND (tol_absolute IS NULL OR tol_absolute = 0)
+                        AND tolerance_value IS NOT NULL AND tolerance_value > 0
+                    """))
+                    conn.execute(text("""
+                        UPDATE test_points
+                        SET tol_pct_reading = tolerance_value / 10000.0
+                        WHERE tolerance_type = 'ppm'
+                        AND (tol_pct_reading IS NULL OR tol_pct_reading = 0)
+                        AND tolerance_value IS NOT NULL AND tolerance_value > 0
+                    """))
+                    conn.commit()
+
+                    # Multi-component tolerance columns for test_results (MySQL)
+                    mysql_result_tol_columns = [
+                        ('tol_pct_reading', 'FLOAT'),
+                        ('tol_pct_range', 'FLOAT'),
+                        ('tol_pct_span', 'FLOAT'),
+                        ('tol_digits', 'FLOAT'),
+                        ('tol_absolute', 'FLOAT'),
+                        ('tol_resolution', 'FLOAT'),
+                        ('tol_range_value', 'FLOAT'),
+                        ('tol_span_value', 'FLOAT'),
+                        ('calculated_tolerance', 'FLOAT'),
+                    ]
+                    for col_name, col_type in mysql_result_tol_columns:
+                        result = conn.execute(text(
+                            f"SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                            f"WHERE TABLE_NAME = 'test_results' AND COLUMN_NAME = '{col_name}'"
+                        ))
+                        if not result.fetchone():
+                            conn.execute(text(f"ALTER TABLE test_results ADD COLUMN {col_name} {col_type}"))
+                            conn.commit()
+                            logger.info(f"Added {col_name} column to test_results")
+
+                    # Check is_published column in changelog_entries
+                    result = conn.execute(text(
+                        "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                        "WHERE TABLE_NAME = 'changelog_entries' AND COLUMN_NAME = 'is_published'"
+                    ))
+                    if not result.fetchone():
+                        conn.execute(text("ALTER TABLE changelog_entries ADD COLUMN is_published BOOLEAN DEFAULT FALSE"))
+                        conn.commit()
+                        # Mark all existing entries as published
+                        conn.execute(text("UPDATE changelog_entries SET is_published = TRUE WHERE version IS NOT NULL"))
+                        conn.commit()
+                        logger.info("Added is_published column to changelog_entries")
+
+                    # Check customer fields in duts table (MySQL)
+                    result = conn.execute(text(
+                        "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                        "WHERE TABLE_NAME = 'duts' AND COLUMN_NAME = 'customer_id'"
+                    ))
+                    if not result.fetchone():
+                        conn.execute(text("ALTER TABLE duts ADD COLUMN customer_id VARCHAR(100)"))
+                        conn.commit()
+                        logger.info("Added customer_id column to duts")
+                    result = conn.execute(text(
+                        "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                        "WHERE TABLE_NAME = 'duts' AND COLUMN_NAME = 'customer_serial'"
+                    ))
+                    if not result.fetchone():
+                        conn.execute(text("ALTER TABLE duts ADD COLUMN customer_serial VARCHAR(100)"))
+                        conn.commit()
+                        logger.info("Added customer_serial column to duts")
         except Exception as e:
             logger.warning(f"Migration check: {e}")
 

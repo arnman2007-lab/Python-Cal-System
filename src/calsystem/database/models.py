@@ -316,6 +316,10 @@ class DUT(Base):
     serial_number = Column(String(100), nullable=True)
     description = Column(Text, nullable=True)
 
+    # Customer info (for reports)
+    customer_id = Column(String(100), nullable=True, comment="Customer identifier")
+    customer_serial = Column(String(100), nullable=True, comment="Customer's serial number for this unit")
+
     # Capabilities
     remote_capable = Column(Boolean, default=False)
     preferred_input_method = Column(Enum(InputMethod), default=InputMethod.KEYBOARD)
@@ -446,9 +450,20 @@ class TestPoint(Base):
     expected_value = Column(Float, nullable=True, comment="Custom expected value if measurement_target=CUSTOM")
     expected_unit = Column(String(20), nullable=True, comment="Custom expected unit if measurement_target=CUSTOM")
 
-    # Tolerance
+    # Tolerance (legacy - kept for backward compatibility)
     tolerance_value = Column(Float, nullable=True)
     tolerance_type = Column(Enum(ToleranceType), default=ToleranceType.PERCENT)
+
+    # Multi-component tolerance specification
+    # Total tolerance = (nominal × pct_reading/100) + (range × pct_range/100) + (span × pct_span/100) + (digits × resolution) + absolute
+    tol_pct_reading = Column(Float, nullable=True, default=0, comment="% of reading component")
+    tol_pct_range = Column(Float, nullable=True, default=0, comment="% of range/full scale component")
+    tol_pct_span = Column(Float, nullable=True, default=0, comment="% of span component")
+    tol_digits = Column(Float, nullable=True, default=0, comment="Number of digits for floor value")
+    tol_absolute = Column(Float, nullable=True, default=0, comment="Absolute tolerance in measurement units")
+    tol_resolution = Column(Float, nullable=True, comment="Resolution for digit calculation (e.g., 0.001)")
+    tol_range_value = Column(Float, nullable=True, comment="Range/full scale reference value")
+    tol_span_value = Column(Float, nullable=True, comment="Span reference value (e.g., 16 for 4-20mA)")
 
     # For calculated test points
     formula = Column(Text, nullable=True, comment="Formula referencing other test points")
@@ -731,9 +746,20 @@ class TestResult(Base):
     deviation = Column(Float, nullable=True)
     deviation_percent = Column(Float, nullable=True)
 
-    # Tolerance info at time of test
+    # Tolerance info at time of test (legacy)
     tolerance_value = Column(Float, nullable=True)
     tolerance_type = Column(String(20), nullable=True)
+
+    # Multi-component tolerance recorded at test time
+    tol_pct_reading = Column(Float, nullable=True)
+    tol_pct_range = Column(Float, nullable=True)
+    tol_pct_span = Column(Float, nullable=True)
+    tol_digits = Column(Float, nullable=True)
+    tol_absolute = Column(Float, nullable=True)
+    tol_resolution = Column(Float, nullable=True)
+    tol_range_value = Column(Float, nullable=True)
+    tol_span_value = Column(Float, nullable=True)
+    calculated_tolerance = Column(Float, nullable=True, comment="Actual tolerance value calculated at test time")
 
     # Result
     status = Column(Enum(TestStatus), default=TestStatus.PENDING)
@@ -776,12 +802,13 @@ class ChangelogEntry(Base):
     __tablename__ = "changelog_entries"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    version = Column(String(20), nullable=False, comment="Semantic version e.g. 0.2.0")
+    version = Column(String(20), nullable=True, comment="Semantic version e.g. 0.2.0 - NULL if unpublished")
     timestamp = Column(DateTime, server_default=func.now(), nullable=False)
     change_type = Column(String(30), nullable=False, comment="Feature, Fix, Improvement, Breaking Change")
     category = Column(String(50), nullable=False, comment="Standards, DUTs, Procedures, etc.")
     description = Column(Text, nullable=False)
     author = Column(String(100), nullable=True, comment="Technician name or Claude")
+    is_published = Column(Boolean, default=False, nullable=False, comment="True once included in a release")
 
     __table_args__ = (
         Index("ix_changelog_version", "version"),

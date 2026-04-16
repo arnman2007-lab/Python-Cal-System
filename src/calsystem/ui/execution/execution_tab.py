@@ -2,6 +2,7 @@
 Test execution tab - where calibrations are performed.
 """
 
+import os
 import re
 import time
 from datetime import datetime
@@ -1468,6 +1469,12 @@ class ExecutionTab(QWidget):
                             "frequency_unit": tp.frequency_unit or "Hz",
                             "tolerance_value": tp.tolerance_value,
                             "tolerance_type": tp.tolerance_type.value if tp.tolerance_type else "percent",
+                            "tol_pct_reading": tp.tol_pct_reading,
+                            "tol_pct_range": tp.tol_pct_range,
+                            "tol_digits": tp.tol_digits,
+                            "tol_absolute": tp.tol_absolute,
+                            "tol_resolution": tp.tol_resolution,
+                            "tol_range_value": tp.tol_range_value,
                             "source_command": tp.source_command,
                             "operate_command": tp.operate_command,
                             "measure_command": tp.measure_command,
@@ -1620,6 +1627,12 @@ class ExecutionTab(QWidget):
                             "frequency_unit": tp.frequency_unit or "Hz",
                             "tolerance_value": tp.tolerance_value,
                             "tolerance_type": tp.tolerance_type.value if tp.tolerance_type else "percent",
+                            "tol_pct_reading": tp.tol_pct_reading,
+                            "tol_pct_range": tp.tol_pct_range,
+                            "tol_digits": tp.tol_digits,
+                            "tol_absolute": tp.tol_absolute,
+                            "tol_resolution": tp.tol_resolution,
+                            "tol_range_value": tp.tol_range_value,
                             "source_command": tp.source_command,
                             "operate_command": tp.operate_command,
                             "measure_command": tp.measure_command,
@@ -1779,13 +1792,34 @@ class ExecutionTab(QWidget):
             # Check for high voltage warning (>= 100V)
             self._check_high_voltage(tp['nominal_value'], tp['unit'])
 
-            # Format tolerance
-            tol_symbol = {
-                "percent": "%",
-                "absolute": "",
-                "ppm": " PPM",
-            }.get(tp['tolerance_type'], "%")
-            self.tolerance_label.setText(f"± {tp['tolerance_value']}{tol_symbol}")
+            # Format tolerance using multi-component spec
+            from calsystem.utils.tolerance import ToleranceSpec
+
+            spec = ToleranceSpec(
+                pct_reading=tp.get('tol_pct_reading') or 0,
+                pct_range=tp.get('tol_pct_range') or 0,
+                pct_span=tp.get('tol_pct_span') or 0,
+                digits=tp.get('tol_digits') or 0,
+                absolute=tp.get('tol_absolute') or 0,
+                resolution=tp.get('tol_resolution') or 0,
+                range_value=tp.get('tol_range_value') or 0,
+                span_value=tp.get('tol_span_value') or 0,
+            )
+
+            # Fallback to legacy tolerance if no multi-component values set
+            if spec.is_empty():
+                legacy_tol = tp.get('tolerance_value') or 0
+                legacy_type = tp.get('tolerance_type', 'percent')
+                spec = ToleranceSpec.from_legacy(legacy_tol, legacy_type)
+
+            # Calculate and display tolerance
+            nominal = tp['nominal_value'] or 0
+            calculated = spec.calculate(nominal)
+            spec_str = spec.format_spec()
+            unit = tp.get('unit', '')
+
+            if not spec.is_empty():
+                self.tolerance_label.setText(f"{spec_str} (±{calculated:g} {unit})")
 
             # Load wiring diagram for this section
             self._load_wiring_diagram(
@@ -1847,7 +1881,7 @@ class ExecutionTab(QWidget):
             self.section_label.setText(section)
             self.testpoint_label.setText(f"Point {row + 1}")
             self.nominal_display.setText(nominal)
-            self.tolerance_label.setText("± 0.1%")
+            self.tolerance_label.setText("No tolerance specified")
 
             self.status_display.append(f"Manual mode: {nominal}")
             self.wiring_label.setText("No wiring diagram available")
@@ -1965,8 +1999,7 @@ class ExecutionTab(QWidget):
                     if specific:
                         diagram = specific
 
-                if diagram and diagram.image_data:
-                    self._display_diagram_image(diagram.image_data)
+                if diagram and self._display_diagram(diagram):
                     self.status_display.append(f"Loaded wiring diagram: {wiring_type}")
                 else:
                     self.wiring_label.setText(f"No diagram found for: {wiring_type}")
@@ -2186,10 +2219,10 @@ class ExecutionTab(QWidget):
                             WiringDiagramLibrary.dut_model.ilike(f"%{dut_model}%")
                         ).first()
 
-                        if lib_diagram and lib_diagram.image_data:
+                        if lib_diagram:
                             logger.debug(f"Auto-lookup found: {lib_diagram.filename} (exact match)")
-                            self._display_diagram_image(lib_diagram.image_data)
-                            return
+                            if self._display_diagram(lib_diagram):
+                                return
 
                     # Try calibrator + section_type only (any DUT)
                     lib_diagram = session.query(WiringDiagramLibrary).filter(
@@ -2197,10 +2230,10 @@ class ExecutionTab(QWidget):
                         WiringDiagramLibrary.section_name == standard_section_type
                     ).first()
 
-                    if lib_diagram and lib_diagram.image_data:
+                    if lib_diagram:
                         logger.debug(f"Auto-lookup found: {lib_diagram.filename}")
-                        self._display_diagram_image(lib_diagram.image_data)
-                        return
+                        if self._display_diagram(lib_diagram):
+                            return
 
                 # 2. Check for direct link via SectionDiagramLink (manual linking)
                 if cal_model:
@@ -2210,9 +2243,8 @@ class ExecutionTab(QWidget):
                     ).first()
 
                     if link and link.diagram:
-                        if link.diagram.image_data:
-                            logger.debug(f"Using linked diagram: {link.diagram.filename}")
-                            self._display_diagram_image(link.diagram.image_data)
+                        logger.debug(f"Using linked diagram: {link.diagram.filename}")
+                        if self._display_diagram(link.diagram):
                             return
 
                 # 3. Check for legacy WiringDiagram entry
@@ -2220,10 +2252,10 @@ class ExecutionTab(QWidget):
                     WiringDiagram.section_id == section_id
                 ).first()
 
-                if diagram and diagram.image_data:
+                if diagram:
                     logger.debug(f"Using legacy diagram: {diagram.name}")
-                    self._display_diagram_image(diagram.image_data)
-                    return
+                    if self._display_diagram(diagram):
+                        return
 
                 # 4. Fuzzy match from library (fallback)
                 if cal_model and section_name:
@@ -2232,17 +2264,106 @@ class ExecutionTab(QWidget):
                         WiringDiagramLibrary.section_name.ilike(f"%{section_name}%")
                     ).first()
 
-                    if lib_diagram and lib_diagram.image_data:
+                    if lib_diagram:
                         logger.debug(f"Using fuzzy match diagram: {lib_diagram.filename}")
-                        self._display_diagram_image(lib_diagram.image_data)
-                        return
+                        if self._display_diagram(lib_diagram):
+                            return
 
         except Exception as e:
             logger.error(f"Failed to load wiring diagram: {e}")
 
+    def _find_diagram_file(self, diagram) -> str | None:
+        """Find the diagram file, checking multiple locations.
+
+        Handles:
+        - Direct path (if exists)
+        - Bundled resources folder (for distributed exe)
+        - User's local diagrams folder
+        """
+        import sys
+        from pathlib import Path
+
+        if not hasattr(diagram, 'image_path') or not diagram.image_path:
+            return None
+
+        stored_path = diagram.image_path
+
+        # 1. Try the stored path directly
+        if os.path.exists(stored_path):
+            return stored_path
+
+        # 2. Try to find in bundled resources or local diagrams folder
+        # Extract relative path from stored path (e.g., "87V/5520A/filename.png")
+        # Look for patterns like .../diagrams/DUT/CAL/file.png
+        path_parts = Path(stored_path).parts
+        try:
+            diagrams_idx = path_parts.index("diagrams")
+            relative_path = os.path.join(*path_parts[diagrams_idx + 1:])
+        except (ValueError, IndexError):
+            # Couldn't find 'diagrams' in path, try just filename
+            relative_path = os.path.basename(stored_path)
+
+        # Check bundled resources folder
+        if getattr(sys, 'frozen', False):
+            bundled_path = os.path.join(sys._MEIPASS, "resources", "diagrams", relative_path)
+            if os.path.exists(bundled_path):
+                return bundled_path
+
+        # Check development resources folder
+        project_root = Path(__file__).parent.parent.parent.parent.parent
+        dev_path = project_root / "resources" / "diagrams" / relative_path
+        if dev_path.exists():
+            return str(dev_path)
+
+        # Check user's local diagrams folder
+        settings = get_settings()
+        local_path = settings.diagrams_dir / relative_path
+        if local_path.exists():
+            return str(local_path)
+
+        logger.warning(f"Diagram file not found: {stored_path} (tried multiple locations)")
+        return None
+
+    def _display_diagram(self, diagram) -> bool:
+        """Display wiring diagram from a diagram object.
+
+        Tries file path first (new method), falls back to BLOB data (legacy).
+        Returns True if successfully displayed, False otherwise.
+        """
+        from PyQt6.QtGui import QImage
+
+        pixmap = None
+
+        # Try loading from file path first (new method)
+        file_path = self._find_diagram_file(diagram)
+        if file_path:
+            pixmap = QPixmap(file_path)
+            if pixmap.isNull():
+                pixmap = None
+                logger.warning(f"Failed to load diagram from path: {file_path}")
+
+        # Fall back to BLOB data (legacy method)
+        if pixmap is None and hasattr(diagram, 'image_data') and diagram.image_data:
+            image = QImage()
+            image.loadFromData(diagram.image_data)
+            if not image.isNull():
+                pixmap = QPixmap.fromImage(image)
+
+        if pixmap and not pixmap.isNull():
+            scaled = pixmap.scaled(
+                self.wiring_label.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            )
+            self.wiring_label.setPixmap(scaled)
+            return True
+        else:
+            self.wiring_label.setText("Failed to load diagram image")
+            return False
+
     def _display_diagram_image(self, image_data: bytes):
-        """Display wiring diagram image."""
-        from PyQt6.QtGui import QImage, QPixmap
+        """Display wiring diagram image from bytes (legacy method)."""
+        from PyQt6.QtGui import QImage
 
         image = QImage()
         image.loadFromData(image_data)
@@ -2602,7 +2723,7 @@ class ExecutionTab(QWidget):
                     test_point_id=tp['id'],
                     measured_value=1.0 if passed else 0.0,  # Use 1/0 for pass/fail
                     status=TestStatus.PASS if passed else TestStatus.FAIL,
-                    input_method=InputMethod.MANUAL,
+                    input_method=InputMethod.KEYBOARD,
                 )
                 session.add(result)
 
@@ -2790,28 +2911,32 @@ class ExecutionTab(QWidget):
                 # Compare reading to nominal_value
                 nominal = tp['nominal_value'] or 0
 
-            tolerance = tp['tolerance_value'] or 0
-            tol_type = tp['tolerance_type']
+            # Use multi-component tolerance if available, fallback to legacy
+            from calsystem.utils.tolerance import ToleranceSpec, check_tolerance
 
-            deviation = measured_value - nominal
+            spec = ToleranceSpec(
+                pct_reading=tp.get('tol_pct_reading') or 0,
+                pct_range=tp.get('tol_pct_range') or 0,
+                pct_span=tp.get('tol_pct_span') or 0,
+                digits=tp.get('tol_digits') or 0,
+                absolute=tp.get('tol_absolute') or 0,
+                resolution=tp.get('tol_resolution') or 0,
+                range_value=tp.get('tol_range_value') or 0,
+                span_value=tp.get('tol_span_value') or 0,
+            )
 
-            # Calculate pass/fail based on tolerance type
-            if tol_type == "percent":
-                if nominal != 0:
-                    percent_dev = abs(deviation / nominal) * 100
-                    passed = percent_dev <= tolerance
-                else:
-                    passed = abs(deviation) <= tolerance
-            elif tol_type == "absolute":
-                passed = abs(deviation) <= tolerance
-            elif tol_type == "ppm":
-                if nominal != 0:
-                    ppm_dev = abs(deviation / nominal) * 1000000
-                    passed = ppm_dev <= tolerance
-                else:
-                    passed = abs(deviation) <= tolerance
-            else:
-                passed = True  # Default to pass if unknown type
+            # Fallback to legacy tolerance if no multi-component values set
+            if spec.is_empty():
+                legacy_tol = tp.get('tolerance_value') or 0
+                legacy_type = tp.get('tolerance_type', 'percent')
+                spec = ToleranceSpec.from_legacy(legacy_tol, legacy_type)
+
+            # Calculate pass/fail using the tolerance spec
+            passed, deviation, calculated_tolerance = check_tolerance(measured_value, nominal, spec)
+
+            # Store calculated tolerance for reporting
+            tp['_calculated_tolerance'] = calculated_tolerance
+            tp['_tolerance_spec'] = spec
         else:
             passed = True  # No test point data, assume pass
 
@@ -2895,17 +3020,38 @@ class ExecutionTab(QWidget):
 
     def _show_fail_dialog(self, row: int, reading: str, deviation: float = 0, tp: dict = None):
         """Show dialog when test point fails."""
-        nominal = tp['nominal_value'] if tp else 0
-        tolerance = tp['tolerance_value'] if tp else 0
-        tol_type = tp['tolerance_type'] if tp else "percent"
+        from calsystem.utils.tolerance import ToleranceSpec
 
-        tol_symbol = {"percent": "%", "absolute": "", "ppm": " PPM"}.get(tol_type, "%")
+        nominal = tp['nominal_value'] if tp else 0
+        unit = tp.get('unit', '') if tp else ''
+
+        # Build tolerance spec
+        if tp:
+            spec = ToleranceSpec(
+                pct_reading=tp.get('tol_pct_reading') or 0,
+                pct_range=tp.get('tol_pct_range') or 0,
+                pct_span=tp.get('tol_pct_span') or 0,
+                digits=tp.get('tol_digits') or 0,
+                absolute=tp.get('tol_absolute') or 0,
+                resolution=tp.get('tol_resolution') or 0,
+                range_value=tp.get('tol_range_value') or 0,
+                span_value=tp.get('tol_span_value') or 0,
+            )
+            if spec.is_empty():
+                legacy_tol = tp.get('tolerance_value') or 0
+                legacy_type = tp.get('tolerance_type', 'percent')
+                spec = ToleranceSpec.from_legacy(legacy_tol, legacy_type)
+        else:
+            spec = ToleranceSpec()
+
+        calculated_tolerance = spec.calculate(nominal)
+        spec_str = spec.format_spec()
 
         msg = f"Test point {row + 1} failed.\n\n"
-        msg += f"Nominal: {nominal} {tp['unit'] if tp else ''}\n"
+        msg += f"Nominal: {nominal} {unit}\n"
         msg += f"Measured: {reading}\n"
         msg += f"Deviation: {deviation:+.6g}\n"
-        msg += f"Tolerance: ± {tolerance}{tol_symbol}\n\n"
+        msg += f"Tolerance: {spec_str} (±{calculated_tolerance:g} {unit})\n\n"
         msg += "What would you like to do?"
 
         reply = QMessageBox.question(

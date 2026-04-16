@@ -146,9 +146,9 @@ class ReportsTab(QWidget):
         results_layout = QVBoxLayout(results_group)
 
         self.results_table = QTableWidget()
-        self.results_table.setColumnCount(5)
+        self.results_table.setColumnCount(6)
         self.results_table.setHorizontalHeaderLabels(
-            ["Test Point", "Nominal", "Measured", "Deviation", "Status"]
+            ["Test Point", "Nominal", "Measured", "Deviation", "Tolerance", "Status"]
         )
         self.results_table.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.Stretch
@@ -253,8 +253,9 @@ class ReportsTab(QWidget):
                     # Technician
                     self.sessions_table.setItem(row, 3, QTableWidgetItem(cal_session.technician_name or "--"))
 
-                    # Result
-                    result = (cal_session.overall_result or cal_session.status.value).title()
+                    # Result - handle status being either enum or string
+                    status_val = cal_session.status.value if hasattr(cal_session.status, 'value') else str(cal_session.status or "")
+                    result = (cal_session.overall_result or status_val).title()
                     result_item = QTableWidgetItem(result)
                     if result.lower() == "pass" or result.lower() == "completed":
                         result_item.setForeground(Qt.GlobalColor.darkGreen)
@@ -312,7 +313,8 @@ class ReportsTab(QWidget):
                 )
                 self.detail_technician.setText(cal_session.technician_name or "--")
 
-                result = (cal_session.overall_result or cal_session.status.value).title()
+                status_val = cal_session.status.value if hasattr(cal_session.status, 'value') else str(cal_session.status or "")
+                result = (cal_session.overall_result or status_val).title()
                 self.detail_result.setText(result)
                 if result.lower() == "pass":
                     self.detail_result.setStyleSheet("color: green; font-weight: bold;")
@@ -353,22 +355,35 @@ class ReportsTab(QWidget):
 
         try:
             with db.session() as session:
-                results = session.query(TestResult).filter(
-                    TestResult.session_id == session_id
-                ).join(TestPoint).order_by(TestResult.measured_at).all()
+                # Use raw SQL to avoid enum mapping issues
+                from sqlalchemy import text
+                query = text("""
+                    SELECT
+                        tr.id, tr.measured_value, tr.status,
+                        tp.id as tp_id, tp.description, tp.nominal_value, tp.unit,
+                        tp.tol_pct_reading, tp.tol_pct_range, tp.tol_pct_span,
+                        tp.tol_digits, tp.tol_absolute, tp.tol_resolution,
+                        tp.tol_range_value, tp.tol_span_value,
+                        tp.tolerance_value, tp.tolerance_type
+                    FROM test_results tr
+                    JOIN test_points tp ON tr.test_point_id = tp.id
+                    WHERE tr.session_id = :session_id
+                    ORDER BY tr.executed_at
+                """)
+                results = session.execute(query, {"session_id": session_id}).fetchall()
+
+                from calsystem.utils.tolerance import ToleranceSpec
 
                 for result in results:
                     row = self.results_table.rowCount()
                     self.results_table.insertRow(row)
 
-                    tp = result.test_point
-
                     # Test Point
-                    test_name = tp.description if tp else f"Point {row + 1}"
+                    test_name = result.description or f"Point {row + 1}"
                     self.results_table.setItem(row, 0, QTableWidgetItem(test_name))
 
                     # Nominal
-                    nominal_str = f"{tp.nominal_value} {tp.unit}" if tp else "--"
+                    nominal_str = f"{result.nominal_value} {result.unit}" if result.nominal_value else "--"
                     self.results_table.setItem(row, 1, QTableWidgetItem(nominal_str))
 
                     # Measured
@@ -376,10 +391,10 @@ class ReportsTab(QWidget):
                     self.results_table.setItem(row, 2, QTableWidgetItem(measured_str))
 
                     # Deviation
-                    if tp and result.measured_value is not None:
-                        deviation = result.measured_value - (tp.nominal_value or 0)
-                        if tp.nominal_value and tp.nominal_value != 0:
-                            dev_pct = (deviation / tp.nominal_value) * 100
+                    if result.nominal_value is not None and result.measured_value is not None:
+                        deviation = result.measured_value - result.nominal_value
+                        if result.nominal_value != 0:
+                            dev_pct = (deviation / result.nominal_value) * 100
                             dev_str = f"{dev_pct:+.4f}%"
                         else:
                             dev_str = f"{deviation:+.6g}"
@@ -387,14 +402,36 @@ class ReportsTab(QWidget):
                         dev_str = "--"
                     self.results_table.setItem(row, 3, QTableWidgetItem(dev_str))
 
-                    # Status
-                    status = result.status.title() if result.status else "--"
+                    # Tolerance
+                    spec = ToleranceSpec(
+                        pct_reading=result.tol_pct_reading or 0,
+                        pct_range=result.tol_pct_range or 0,
+                        pct_span=result.tol_pct_span or 0,
+                        digits=result.tol_digits or 0,
+                        absolute=result.tol_absolute or 0,
+                        resolution=result.tol_resolution or 0,
+                        range_value=result.tol_range_value or 0,
+                        span_value=result.tol_span_value or 0,
+                    )
+                    if spec.is_empty() and result.tolerance_value:
+                        legacy_type = result.tolerance_type or "percent"
+                        spec = ToleranceSpec.from_legacy(result.tolerance_value, legacy_type)
+
+                    if not spec.is_empty():
+                        calculated = spec.calculate(result.nominal_value or 0)
+                        tol_str = f"{spec.format_spec()} (±{calculated:g})"
+                    else:
+                        tol_str = "--"
+                    self.results_table.setItem(row, 4, QTableWidgetItem(tol_str))
+
+                    # Status (already a string from raw query)
+                    status = str(result.status).title() if result.status else "--"
                     status_item = QTableWidgetItem(status)
                     if status.lower() == "pass":
                         status_item.setForeground(Qt.GlobalColor.darkGreen)
                     elif status.lower() == "fail":
                         status_item.setForeground(Qt.GlobalColor.red)
-                    self.results_table.setItem(row, 4, status_item)
+                    self.results_table.setItem(row, 5, status_item)
 
                 logger.debug(f"Loaded {len(results)} test results")
 
@@ -438,87 +475,28 @@ class ReportsTab(QWidget):
             QMessageBox.critical(self, "Error", f"Failed to generate PDF:\n{e}")
 
     def _generate_pdf_report(self, file_path: str):
-        """Generate the actual PDF report."""
-        try:
-            from reportlab.lib import colors
-            from reportlab.lib.pagesizes import letter
-            from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-            from reportlab.lib.units import inch
-            from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
-        except ImportError:
-            raise ImportError("reportlab is required for PDF generation. Install with: pip install reportlab")
+        """Generate the actual PDF report using the new template generator."""
+        from pathlib import Path
+        from calsystem.utils.report_generator import (
+            generate_calibration_report,
+            build_report_from_session,
+        )
 
-        doc = SimpleDocTemplate(file_path, pagesize=letter)
-        styles = getSampleStyleSheet()
-        elements = []
+        # Build report data from session
+        report_data = build_report_from_session(self._current_session_id)
 
-        # Title
-        title_style = ParagraphStyle('Title', parent=styles['Title'], fontSize=18, spaceAfter=20)
-        elements.append(Paragraph("Calibration Report", title_style))
-        elements.append(Spacer(1, 12))
+        if not report_data:
+            raise Exception("Failed to build report data from session")
 
-        # Session info table
-        data = self._current_session_data
-        info_data = [
-            ["Asset Number:", data.get("asset", "")],
-            ["DUT:", data.get("dut_info", "")],
-            ["Work Order:", data.get("work_order", "")],
-            ["Date:", data.get("date").strftime("%Y-%m-%d %H:%M") if data.get("date") else ""],
-            ["Technician:", data.get("technician", "")],
-            ["Procedure:", data.get("procedure", "")],
-            ["Result:", data.get("result", "")],
-        ]
+        # Generate the PDF
+        success = generate_calibration_report(
+            output_path=Path(file_path),
+            header=report_data['header'],
+            sections=report_data['sections'],
+        )
 
-        info_table = Table(info_data, colWidths=[1.5*inch, 4*inch])
-        info_table.setStyle(TableStyle([
-            ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
-            ('ALIGN', (0, 0), (0, -1), 'RIGHT'),
-            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-        ]))
-        elements.append(info_table)
-        elements.append(Spacer(1, 20))
-
-        # Test results
-        elements.append(Paragraph("Test Results", styles['Heading2']))
-        elements.append(Spacer(1, 12))
-
-        # Build results data from table
-        results_data = [["Test Point", "Nominal", "Measured", "Deviation", "Status"]]
-        for row in range(self.results_table.rowCount()):
-            row_data = []
-            for col in range(5):
-                item = self.results_table.item(row, col)
-                row_data.append(item.text() if item else "")
-            results_data.append(row_data)
-
-        if len(results_data) > 1:
-            results_table = Table(results_data, colWidths=[2*inch, 1.2*inch, 1.2*inch, 1*inch, 0.8*inch])
-            results_table.setStyle(TableStyle([
-                ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
-                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-                ('FONTSIZE', (0, 0), (-1, -1), 9),
-                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-                ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
-                ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-            ]))
-            elements.append(results_table)
-
-        elements.append(Spacer(1, 30))
-
-        # Signature lines
-        elements.append(Paragraph("Signatures", styles['Heading3']))
-        elements.append(Spacer(1, 20))
-
-        sig_data = [
-            ["Technician: _____________________", "Date: ___________"],
-            ["", ""],
-            ["Supervisor: _____________________", "Date: ___________"],
-        ]
-        sig_table = Table(sig_data, colWidths=[3.5*inch, 2*inch])
-        elements.append(sig_table)
-
-        doc.build(elements)
+        if not success:
+            raise Exception("Failed to generate PDF report")
 
     def _on_export_excel(self):
         """Export to Excel."""
@@ -591,7 +569,7 @@ class ReportsTab(QWidget):
 
         # Results header
         start_row = 8
-        headers = ["Test Point", "Nominal", "Measured", "Deviation", "Status"]
+        headers = ["Test Point", "Nominal", "Measured", "Deviation", "Tolerance", "Status"]
         for col, header in enumerate(headers, 1):
             cell = ws.cell(row=start_row, column=col, value=header)
             cell.font = header_font
@@ -599,7 +577,7 @@ class ReportsTab(QWidget):
 
         # Results data
         for row in range(self.results_table.rowCount()):
-            for col in range(5):
+            for col in range(6):
                 item = self.results_table.item(row, col)
                 ws.cell(row=start_row + row + 1, column=col + 1, value=item.text() if item else "")
 

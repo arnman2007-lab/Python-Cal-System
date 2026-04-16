@@ -114,6 +114,33 @@ class SettingsDialog(QDialog):
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.status_label)
 
+        # Company info group (for reports)
+        company_group = QGroupBox("Company Information")
+        company_layout = QFormLayout()
+
+        self.company_name_input = QLineEdit()
+        self.company_name_input.setPlaceholderText("Your company name (appears on reports)")
+        company_layout.addRow("Company Name:", self.company_name_input)
+
+        company_group.setLayout(company_layout)
+        layout.addWidget(company_group)
+
+        # Update settings group
+        update_group = QGroupBox("Automatic Updates")
+        update_layout = QFormLayout()
+
+        self.update_server_input = QLineEdit()
+        self.update_server_input.setPlaceholderText("\\\\server\\calsystem")
+        update_layout.addRow("Update Server Path:", self.update_server_input)
+
+        from PyQt6.QtWidgets import QCheckBox
+        self.check_updates_checkbox = QCheckBox("Check for updates on startup")
+        self.check_updates_checkbox.setChecked(True)
+        update_layout.addRow("", self.check_updates_checkbox)
+
+        update_group.setLayout(update_layout)
+        layout.addWidget(update_group)
+
         # Spacer
         layout.addStretch()
 
@@ -171,6 +198,13 @@ class SettingsDialog(QDialog):
         self.username_input.setText(settings.database.username)
         self.password_input.setText(settings.database.password)
         self.database_input.setText(settings.database.database)
+
+        # Company settings
+        self.company_name_input.setText(settings.company_name or "")
+
+        # Update settings
+        self.update_server_input.setText(settings.update_server_path or "")
+        self.check_updates_checkbox.setChecked(settings.check_updates_on_startup)
 
     def _get_connection_string(self) -> str:
         """Build connection string from current field values."""
@@ -259,6 +293,13 @@ class SettingsDialog(QDialog):
                 "password": self.password_input.text(),
                 "database": self.database_input.text() or "calsystem",
             }
+
+            # Company settings
+            config_data["company_name"] = self.company_name_input.text().strip()
+
+            # Update settings
+            config_data["update_server_path"] = self.update_server_input.text().strip()
+            config_data["check_updates_on_startup"] = self.check_updates_checkbox.isChecked()
 
             # Ensure config directory exists
             settings.config_dir.mkdir(parents=True, exist_ok=True)

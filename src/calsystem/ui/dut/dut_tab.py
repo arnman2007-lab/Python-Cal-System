@@ -182,6 +182,15 @@ class DUTTab(QWidget):
         self.description_input.setMaximumHeight(80)
         info_layout.addRow("Description:", self.description_input)
 
+        # Customer info (for reports)
+        self.customer_id_input = QLineEdit()
+        self.customer_id_input.setPlaceholderText("Customer identifier")
+        info_layout.addRow("Customer ID:", self.customer_id_input)
+
+        self.customer_serial_input = QLineEdit()
+        self.customer_serial_input.setPlaceholderText("Customer's serial number (if different)")
+        info_layout.addRow("Customer S/N:", self.customer_serial_input)
+
         self.details_tabs.addTab(info_tab, "Information")
 
         # Capabilities tab
@@ -596,6 +605,8 @@ class DUTTab(QWidget):
                 self.model_input.setText(dut.model or "")
                 self.serial_input.setText(dut.serial_number or "")
                 self.description_input.setPlainText(dut.description or "")
+                self.customer_id_input.setText(dut.customer_id or "")
+                self.customer_serial_input.setText(dut.customer_serial or "")
 
                 # Populate Capabilities tab
                 self.remote_capable_check.setChecked(dut.remote_capable or False)
@@ -657,6 +668,8 @@ class DUTTab(QWidget):
         self.model_input.clear()
         self.serial_input.clear()
         self.description_input.clear()
+        self.customer_id_input.clear()
+        self.customer_serial_input.clear()
 
         # Reset checkboxes and combos
         self.manual_asset_check.setChecked(False)
@@ -783,6 +796,8 @@ class DUTTab(QWidget):
                 dut.model = model
                 dut.serial_number = self.serial_input.text().strip() or None
                 dut.description = self.description_input.toPlainText().strip() or None
+                dut.customer_id = self.customer_id_input.text().strip() or None
+                dut.customer_serial = self.customer_serial_input.text().strip() or None
                 dut.remote_capable = self.remote_capable_check.isChecked()
                 dut.preferred_input_method = input_method
                 dut.ocr_mode = ocr_mode
@@ -865,8 +880,9 @@ class DUTTab(QWidget):
                     # Technician
                     self.history_table.setItem(row, 2, QTableWidgetItem(cal_session.technician_name or "--"))
 
-                    # Result
-                    result = (cal_session.overall_result or cal_session.status.value).title()
+                    # Result - handle status being either enum or string
+                    status_val = cal_session.status.value if hasattr(cal_session.status, 'value') else str(cal_session.status or "")
+                    result = (cal_session.overall_result or status_val).title()
                     result_item = QTableWidgetItem(result)
                     if result.lower() == "pass":
                         result_item.setForeground(Qt.GlobalColor.darkGreen)

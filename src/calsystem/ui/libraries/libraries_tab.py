@@ -3,6 +3,8 @@ Libraries tab - Manage wiring diagram images by calibrator + DUT combination.
 """
 
 import os
+import sys
+from pathlib import Path
 from typing import Optional, List, Dict, Any
 
 from PyQt6.QtWidgets import (
@@ -550,6 +552,11 @@ class LibrariesTab(QWidget):
         self.section_types_btn.clicked.connect(self._on_manage_section_types)
         btn_layout.addWidget(self.section_types_btn)
 
+        self.migrate_btn = QPushButton("Migrate to Files...")
+        self.migrate_btn.setToolTip("Extract database-stored images to files for better performance")
+        self.migrate_btn.clicked.connect(self._on_migrate_images)
+        btn_layout.addWidget(self.migrate_btn)
+
         btn_layout.addStretch()
         list_layout.addLayout(btn_layout)
 
@@ -913,6 +920,43 @@ class LibrariesTab(QWidget):
         except Exception as e:
             logger.error(f"Failed to load wiring diagrams: {e}")
 
+    def _find_diagram_file(self, image_path: str) -> str | None:
+        """Find the diagram file, checking multiple locations."""
+        if not image_path:
+            return None
+
+        # 1. Try the stored path directly
+        if os.path.exists(image_path):
+            return image_path
+
+        # 2. Extract relative path and try other locations
+        path_parts = Path(image_path).parts
+        try:
+            diagrams_idx = path_parts.index("diagrams")
+            relative_path = os.path.join(*path_parts[diagrams_idx + 1:])
+        except (ValueError, IndexError):
+            relative_path = os.path.basename(image_path)
+
+        # Check bundled resources folder
+        if getattr(sys, 'frozen', False):
+            bundled_path = os.path.join(sys._MEIPASS, "resources", "diagrams", relative_path)
+            if os.path.exists(bundled_path):
+                return bundled_path
+
+        # Check development resources folder
+        project_root = Path(__file__).parent.parent.parent.parent.parent
+        dev_path = project_root / "resources" / "diagrams" / relative_path
+        if dev_path.exists():
+            return str(dev_path)
+
+        # Check user's local diagrams folder
+        settings = get_settings()
+        local_path = settings.diagrams_dir / relative_path
+        if local_path.exists():
+            return str(local_path)
+
+        return None
+
     def _on_image_selected(self):
         """Handle image selection - show preview."""
         selected = self.image_table.selectedItems()
@@ -935,22 +979,35 @@ class LibrariesTab(QWidget):
                     WiringDiagramLibrary.id == diagram_id
                 ).first()
 
-                if diagram and diagram.image_data:
-                    # Load image from bytes
+                if not diagram:
+                    self.preview_label.setText("Diagram not found")
+                    return
+
+                pixmap = None
+
+                # Try loading from file path first (new method)
+                file_path = self._find_diagram_file(diagram.image_path)
+                if file_path:
+                    pixmap = QPixmap(file_path)
+                    if pixmap.isNull():
+                        pixmap = None
+                        logger.warning(f"Failed to load image from path: {file_path}")
+
+                # Fall back to BLOB data (legacy method)
+                if pixmap is None and diagram.image_data:
                     image = QImage()
                     image.loadFromData(diagram.image_data)
-
                     if not image.isNull():
                         pixmap = QPixmap.fromImage(image)
-                        # Scale to fixed size to prevent container growth
-                        scaled = pixmap.scaled(
-                            500, 400,
-                            Qt.AspectRatioMode.KeepAspectRatio,
-                            Qt.TransformationMode.SmoothTransformation
-                        )
-                        self.preview_label.setPixmap(scaled)
-                    else:
-                        self.preview_label.setText("Failed to load image")
+
+                if pixmap and not pixmap.isNull():
+                    # Scale to fixed size to prevent container growth
+                    scaled = pixmap.scaled(
+                        500, 400,
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation
+                    )
+                    self.preview_label.setPixmap(scaled)
                 else:
                     self.preview_label.setText("No image data")
 
@@ -973,28 +1030,59 @@ class LibrariesTab(QWidget):
             data = dialog.get_data()
             self._save_image(data)
 
+    def _get_diagrams_dir(self) -> Path:
+        """Get the diagrams directory - resources/diagrams for dev, ~/.calsystem/diagrams for bundled."""
+        if getattr(sys, 'frozen', False):
+            # Running from bundled exe - save to user's local folder (bundled is read-only)
+            settings = get_settings()
+            return settings.diagrams_dir
+        else:
+            # Running from source - save to resources/diagrams for bundling
+            project_root = Path(__file__).parent.parent.parent.parent.parent
+            return project_root / "resources" / "diagrams"
+
     def _save_image(self, data: Dict[str, Any]):
-        """Save a wiring diagram image to the database."""
+        """Save a wiring diagram image to file and database."""
         db = get_db()
         if not db.is_connected:
             QMessageBox.critical(self, "Error", "Database not connected.")
             return
 
         try:
+            # Get diagrams directory
+            diagrams_dir = self._get_diagrams_dir()
+
+            # Create subdirectory structure: diagrams/{dut_model}/{calibrator_model}/
+            # Organized by DUT first (what you're calibrating), then by calibrator (what you're using)
+            dut_dir = diagrams_dir / self._sanitize_filename(self._current_dut)
+            cal_dir = dut_dir / self._sanitize_filename(self._current_calibrator)
+            cal_dir.mkdir(parents=True, exist_ok=True)
+
+            # Save image file
+            filename = data["filename"]
+            file_path = cal_dir / filename
+
+            with open(file_path, "wb") as f:
+                f.write(data["image_data"])
+
+            logger.info(f"Saved wiring diagram file: {file_path}")
+
+            # Save to database with file path (no BLOB data)
             with db.session() as session:
                 diagram = WiringDiagramLibrary(
                     calibrator_make=self._current_calibrator_make,
                     calibrator_model=self._current_calibrator,
                     dut_model=self._current_dut,
                     section_name=data["section_name"],
-                    image_data=data["image_data"],
+                    image_data=None,  # Don't store BLOB
+                    image_path=str(file_path),  # Store file path
                     mime_type=data["mime_type"],
                     filename=data["filename"],
                     description=data["description"],
                 )
                 session.add(diagram)
 
-            logger.info(f"Saved wiring diagram: {data['filename']}")
+            logger.info(f"Saved wiring diagram to database: {data['filename']}")
             self._refresh_image_list()
 
             QMessageBox.information(
@@ -1005,6 +1093,15 @@ class LibrariesTab(QWidget):
         except Exception as e:
             logger.error(f"Failed to save wiring diagram: {e}")
             QMessageBox.critical(self, "Error", f"Failed to save image:\n{e}")
+
+    def _sanitize_filename(self, name: str) -> str:
+        """Sanitize a string for use as a filename/directory name."""
+        # Replace invalid characters with underscores
+        invalid_chars = '<>:"/\\|?*'
+        result = name
+        for char in invalid_chars:
+            result = result.replace(char, '_')
+        return result.strip()
 
     def _on_delete_image(self):
         """Delete the selected wiring diagram."""
@@ -1039,8 +1136,16 @@ class LibrariesTab(QWidget):
                 ).first()
 
                 if diagram:
+                    # Delete the file if it exists
+                    if diagram.image_path and os.path.exists(diagram.image_path):
+                        try:
+                            os.remove(diagram.image_path)
+                            logger.info(f"Deleted wiring diagram file: {diagram.image_path}")
+                        except OSError as e:
+                            logger.warning(f"Could not delete file {diagram.image_path}: {e}")
+
                     session.delete(diagram)
-                    logger.info(f"Deleted wiring diagram: {diagram.filename}")
+                    logger.info(f"Deleted wiring diagram from database: {diagram.filename}")
 
             self._refresh_image_list()
 
@@ -1052,6 +1157,109 @@ class LibrariesTab(QWidget):
         """Open the section types management dialog."""
         dialog = SectionTypesDialog(self)
         dialog.exec()
+
+    def _on_migrate_images(self):
+        """Migrate database-stored images to files."""
+        db = get_db()
+        if not db.is_connected:
+            QMessageBox.warning(self, "Database Error", "Database not connected.")
+            return
+
+        # Count images that need migration
+        try:
+            with db.session() as session:
+                # Find records with image_data but no image_path
+                count = session.query(WiringDiagramLibrary).filter(
+                    WiringDiagramLibrary.image_data.isnot(None),
+                    (WiringDiagramLibrary.image_path.is_(None)) | (WiringDiagramLibrary.image_path == "")
+                ).count()
+
+            if count == 0:
+                QMessageBox.information(
+                    self, "Migration Complete",
+                    "All wiring diagram images are already stored as files.\n"
+                    "No migration needed."
+                )
+                return
+
+            reply = QMessageBox.question(
+                self, "Migrate Images",
+                f"Found {count} wiring diagram image(s) stored in the database.\n\n"
+                f"This will:\n"
+                f"1. Extract images to files in your diagrams folder\n"
+                f"2. Update database records to use file paths\n"
+                f"3. Clear binary data from the database to save space\n\n"
+                f"Continue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
+            # Perform migration - use same directory logic as _save_image
+            diagrams_dir = self._get_diagrams_dir()
+            migrated = 0
+            errors = []
+
+            with db.session() as session:
+                diagrams = session.query(WiringDiagramLibrary).filter(
+                    WiringDiagramLibrary.image_data.isnot(None),
+                    (WiringDiagramLibrary.image_path.is_(None)) | (WiringDiagramLibrary.image_path == "")
+                ).all()
+
+                for diagram in diagrams:
+                    try:
+                        # Create directory structure: {dut_model}/{calibrator_model}/
+                        dut_dir = diagrams_dir / self._sanitize_filename(diagram.dut_model or "Unknown")
+                        cal_dir = dut_dir / self._sanitize_filename(diagram.calibrator_model or "Unknown")
+                        cal_dir.mkdir(parents=True, exist_ok=True)
+
+                        # Determine filename
+                        if diagram.filename:
+                            filename = diagram.filename
+                        else:
+                            ext = ".png"
+                            if diagram.mime_type:
+                                mime_ext = {"image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif"}
+                                ext = mime_ext.get(diagram.mime_type, ".png")
+                            filename = f"{diagram.calibrator_model}_{diagram.dut_model}_{diagram.section_name}{ext}"
+                            filename = self._sanitize_filename(filename)
+
+                        file_path = cal_dir / filename
+
+                        # Write file
+                        with open(file_path, "wb") as f:
+                            f.write(diagram.image_data)
+
+                        # Update record
+                        diagram.image_path = str(file_path)
+                        diagram.image_data = None  # Clear BLOB to save space
+
+                        migrated += 1
+                        logger.info(f"Migrated: {file_path}")
+
+                    except Exception as e:
+                        errors.append(f"{diagram.filename or diagram.id}: {e}")
+                        logger.error(f"Migration error: {e}")
+
+                session.commit()
+
+            # Show results
+            msg = f"Successfully migrated {migrated} image(s) to files."
+            if errors:
+                msg += f"\n\n{len(errors)} error(s):\n" + "\n".join(errors[:5])
+                if len(errors) > 5:
+                    msg += f"\n... and {len(errors) - 5} more"
+                QMessageBox.warning(self, "Migration Complete", msg)
+            else:
+                QMessageBox.information(self, "Migration Complete", msg)
+
+            # Refresh the display
+            self._refresh_image_list()
+
+        except Exception as e:
+            logger.error(f"Migration failed: {e}")
+            QMessageBox.critical(self, "Migration Error", f"Migration failed:\n{e}")
 
     def _on_start_hv_blink(self):
         """Start the high voltage warning fading animation."""

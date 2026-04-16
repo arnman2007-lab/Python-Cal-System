@@ -73,9 +73,29 @@ class CalsystemApp(QMainWindow):
             self.db_status_label.setStyleSheet("color: green;")
             # Update window title with current version from changelog
             self._update_window_title()
+            # Check for updates on startup if enabled
+            self._check_for_updates_on_startup()
         else:
             self.db_status_label.setText("Database: Not Connected")
             self.db_status_label.setStyleSheet("color: red;")
+
+    def _check_for_updates_on_startup(self):
+        """Check for updates on startup if enabled in settings."""
+        from PyQt6.QtCore import QTimer
+        settings = get_settings()
+        if settings.check_updates_on_startup and settings.update_server_path:
+            # Delay the check slightly so the UI fully loads first
+            QTimer.singleShot(2000, self._on_check_updates_silent)
+
+    def _on_check_updates_silent(self):
+        """Check for updates silently (no message if no updates)."""
+        try:
+            from calsystem.updater.checker import check_for_updates
+            update_info = check_for_updates()
+            if update_info:
+                self._show_update_dialog(update_info)
+        except Exception as e:
+            logger.warning(f"Update check failed: {e}")
 
     def _get_current_version(self) -> str:
         """Get the current version from the changelog database."""
@@ -174,6 +194,12 @@ class CalsystemApp(QMainWindow):
 
         # Help menu
         help_menu = menubar.addMenu("&Help")
+
+        check_updates_action = QAction("Check for &Updates...", self)
+        check_updates_action.triggered.connect(self._on_check_updates)
+        help_menu.addAction(check_updates_action)
+
+        help_menu.addSeparator()
 
         view_logs_action = QAction("View &Logs...", self)
         view_logs_action.triggered.connect(self._on_view_logs)
@@ -347,6 +373,69 @@ class CalsystemApp(QMainWindow):
             "A comprehensive tool for managing calibration laboratory "
             "equipment, procedures, and reports.",
         )
+
+    def _on_check_updates(self):
+        """Manually check for updates."""
+        logger.info("Manual update check requested")
+        settings = get_settings()
+
+        if not settings.update_server_path:
+            QMessageBox.information(
+                self,
+                "Update Check",
+                "No update server configured.\n\n"
+                "Configure the update server path in Settings to enable automatic updates.",
+            )
+            return
+
+        try:
+            from calsystem.updater.checker import check_for_updates
+            update_info = check_for_updates()
+
+            if update_info:
+                self._show_update_dialog(update_info)
+            else:
+                QMessageBox.information(
+                    self,
+                    "No Updates",
+                    f"You are running the latest version.\n\n"
+                    f"Current version: {self._get_current_version()}",
+                )
+        except Exception as e:
+            logger.error(f"Update check failed: {e}")
+            QMessageBox.warning(
+                self,
+                "Update Check Failed",
+                f"Could not check for updates:\n{e}",
+            )
+
+    def _show_update_dialog(self, update_info):
+        """Show the update available dialog."""
+        from calsystem.ui.dialogs.update_dialog import UpdateDialog
+        dialog = UpdateDialog(update_info, self)
+        if dialog.exec():
+            # User chose to update - apply it
+            from calsystem.updater.checker import download_update, apply_update
+
+            self.status_bar.showMessage("Downloading update...")
+
+            if download_update(update_info):
+                self.status_bar.showMessage("Applying update...")
+                if apply_update():
+                    # Close the app - updater will restart it
+                    self.close()
+                else:
+                    QMessageBox.warning(
+                        self,
+                        "Update Failed",
+                        "Failed to apply update. Please try again.",
+                    )
+            else:
+                QMessageBox.warning(
+                    self,
+                    "Download Failed",
+                    "Failed to download update. Check your network connection.",
+                )
 
     def closeEvent(self, event):
         """Handle window close event."""

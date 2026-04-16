@@ -593,6 +593,54 @@
 
 ---
 
+## 2026-04-14 - Section Commands & Test Section Button
+
+### What was implemented
+1. **Section Commands with Command Bank Integration**:
+   - Replaced free-text section command input with dropdown + list system
+   - Dropdown populated from active workstation calibrators' Command Bank
+   - "+" button adds selected command to list; "-" removes selected
+   - "↻" refresh button reloads commands from Command Bank
+   - Multiple commands supported - run in order when executed
+   - Command reference names (e.g., "Standby") auto-translated to SCPI commands ("STBY")
+   - Only queries active workstation standards via WorkstationStandard join
+
+2. **Test Section Button in Procedures Tab**:
+   - Added "Test Section" button to Section Details panel
+   - Shows preview dialog with:
+     - Wiring diagram (if configured)
+     - Section prompt text
+     - Send Commands checkbox (optional)
+     - Command results with ✓/✗ indicators
+   - Commands show: reference name → SCPI command
+   - Red X when VISA not connected (expected on dev PC)
+
+3. **Dynamic Version Display**:
+   - App title bar shows version from changelog database
+   - `_get_current_version()` queries latest ChangelogEntry
+   - About dialog also uses dynamic version
+   - Fixed `_load_changelog()` call in changelog_tab init
+
+### Files Changed
+- src/calsystem/ui/procedures/procedures_tab.py (major - command dropdown, test section)
+- src/calsystem/app.py (dynamic version from changelog)
+- src/calsystem/ui/changelog/changelog_tab.py (load changelog on init)
+- src/calsystem/ui/execution/execution_tab.py (removed old test section button)
+
+### Build Files Status
+- **No updates needed** - all dependencies already covered
+- Hidden imports include: pyvisa_py, sqlalchemy, pydantic, loguru (all used)
+- Data files include: resources/, Images/ folders
+- Changelog tab uses existing SQLAlchemy models (auto-included)
+
+### Learnings
+- WorkstationStandard.is_active == True filters to only active workstation equipment
+- DeviceGroupType.CALIBRATOR enum for filtering calibrators
+- Merge command banks from multiple active calibrators for full command list
+- VISAManager uses `scan()` method not `list_resources()`
+
+---
+
 ## 2026-04-13 - Maintenance: High Voltage Image Fix & Build Process
 
 ### Issue Fixed
