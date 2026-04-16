@@ -57,6 +57,7 @@ from calsystem.database.models import (
 from calsystem.config.settings import get_settings
 from calsystem.ui.dialogs.calibrator_selection_dialog import CalibratorSelectionDialog
 from calsystem.instruments.visa_manager import get_visa_manager, PYVISA_AVAILABLE
+from calsystem.procedures import CSPFile, ProcedureData
 
 
 class PassFailDialog(QDialog):
@@ -151,6 +152,7 @@ class ExecutionTab(QWidget):
         self._current_session_id: Optional[int] = None
         self._current_dut_id: Optional[int] = None
         self._current_procedure_id: Optional[int] = None
+        self._current_csp_data: Optional[ProcedureData] = None  # Loaded .csp procedure data
         self._test_points: List[Dict[str, Any]] = []
         self._current_test_index: int = 0
         self._current_section_id: Optional[int] = None  # Track section for wiring confirmation
@@ -1568,7 +1570,10 @@ class ExecutionTab(QWidget):
             self.status_display.append(f"ERROR: {e}")
 
     def _load_test_points(self):
-        """Load test points from procedure into the table."""
+        """Load test points from procedure into the table.
+
+        Loads from .csp file if available, otherwise falls back to database.
+        """
         if not self._current_procedure_id:
             self.status_display.append("ERROR: No procedure ID set")
             return
@@ -1581,6 +1586,7 @@ class ExecutionTab(QWidget):
         self.status_display.append("Loading test points...")
 
         self._test_points = []
+        self._current_csp_data = None  # Clear any previous CSP data
         self.testpoints_table.setRowCount(0)
 
         try:
@@ -1592,6 +1598,15 @@ class ExecutionTab(QWidget):
                 if not procedure:
                     QMessageBox.warning(self, "Error", "Procedure not found.")
                     return
+
+                # Check if procedure has a CSP file
+                if procedure.file_path and os.path.exists(procedure.file_path):
+                    self.status_display.append(f"Loading from CSP: {os.path.basename(procedure.file_path)}")
+                    self._load_test_points_from_csp(procedure.file_path)
+                    return  # CSP loading handles the rest
+
+                # Fall back to database loading
+                self.status_display.append("Loading from database...")
 
                 # Clean up any corrupted section names (with accumulated [type] suffixes)
                 sections_cleaned = False
@@ -1609,7 +1624,7 @@ class ExecutionTab(QWidget):
                 if sections_cleaned:
                     session.commit()
 
-                # Load all sections and test points
+                # Load all sections and test points from database
                 for section in procedure.sections:
                     for tp in section.test_points:
                         self._test_points.append({
@@ -1724,6 +1739,137 @@ class ExecutionTab(QWidget):
         if self.input_method_combo.currentText() == "Keyboard Entry":
             self.reading_input.setFocus()
             self.reading_input.selectAll()
+
+    def _load_test_points_from_csp(self, csp_file_path: str):
+        """Load test points from a .csp file.
+
+        Args:
+            csp_file_path: Path to the .csp file
+        """
+        from pathlib import Path
+
+        try:
+            # Load procedure data from CSP
+            self._current_csp_data = CSPFile.load(Path(csp_file_path))
+
+            if not self._current_csp_data:
+                self.status_display.append("ERROR: Failed to load CSP file")
+                QMessageBox.critical(self, "Error", f"Failed to load procedure from:\n{csp_file_path}")
+                return
+
+            logger.info(f"Loaded CSP: {self._current_csp_data.name} with {self._current_csp_data.section_count} sections")
+
+            # Convert CSP data to test points list
+            section_id = 0  # Use sequential IDs for sections
+            for section in self._current_csp_data.sections:
+                section_id += 1
+                for tp in section.test_points:
+                    self._test_points.append({
+                        "id": None,  # No database ID for CSP-loaded test points
+                        "section_id": section_id,
+                        "section_name": section.name,
+                        "standard_section_type": section.standard_section_type,
+                        "section_command": section.section_command,
+                        "section_prompt": section.section_prompt,
+                        "section_wiring_type": section.section_wiring_type,
+                        "section_wiring_image": section.wiring_image,  # CSP embedded image path
+                        "description": tp.description or f"{tp.nominal_value} {tp.unit}",
+                        "nominal_value": tp.nominal_value,
+                        "unit": tp.unit,
+                        "frequency": tp.frequency,
+                        "frequency_unit": tp.frequency_unit or "Hz",
+                        "tolerance_value": tp.tolerance_value,
+                        "tolerance_type": tp.tolerance_type or "PERCENT",
+                        "tol_pct_reading": tp.tol_pct_reading,
+                        "tol_pct_range": tp.tol_pct_range,
+                        "tol_digits": tp.tol_digits,
+                        "tol_absolute": tp.tol_absolute,
+                        "tol_resolution": tp.tol_resolution,
+                        "tol_range_value": tp.tol_range_value,
+                        "source_command": tp.source_command,
+                        "operate_command": tp.operate_command,
+                        "measure_command": tp.measure_command,
+                        "test_type": tp.test_type or "measurement",
+                        "pass_fail_prompt": tp.pass_fail_prompt,
+                        "operator_prompt": tp.operator_prompt,
+                        # Pre-conditioning
+                        "pre_nominal_value": tp.pre_nominal_value,
+                        "pre_unit": tp.pre_unit,
+                        "pre_frequency": tp.pre_frequency,
+                        "pre_frequency_unit": tp.pre_frequency_unit or "Hz",
+                        "pre_delay_seconds": tp.pre_delay_seconds or 0,
+                        "pre_conditioning_steps": tp.pre_conditioning_steps or [],
+                        # Measurement target
+                        "measurement_target": tp.measurement_target or "PRIMARY",
+                        "expected_value": tp.expected_value,
+                        "expected_unit": tp.expected_unit,
+                        # Test point specific wiring diagram
+                        "wiring_diagram_type": tp.wiring_diagram_type,
+                    })
+
+            if not self._test_points:
+                self.status_display.append("ERROR: CSP file has no test points!")
+                QMessageBox.warning(self, "No Test Points", "This procedure has no test points.")
+                return
+
+            # Populate table (same as database loading)
+            self.testpoints_table.setRowCount(len(self._test_points))
+            self.progress_bar.setMaximum(len(self._test_points))
+            self.progress_bar.setValue(0)
+            self.pending_label.setText(f"Pending: {len(self._test_points)}")
+            self.pass_label.setText("Pass: 0")
+            self.fail_label.setText("Fail: 0")
+
+            for i, tp in enumerate(self._test_points):
+                # Number
+                self.testpoints_table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
+
+                # Section / Test
+                section_test = f"{tp['section_name']} / {tp['description']}"
+                self.testpoints_table.setItem(i, 1, QTableWidgetItem(section_test))
+
+                # Nominal
+                nominal_str = f"{tp['nominal_value']} {tp['unit']}"
+                if tp.get('frequency'):
+                    nominal_str += f" @ {tp['frequency']} {tp.get('frequency_unit', 'Hz')}"
+                self.testpoints_table.setItem(i, 2, QTableWidgetItem(nominal_str))
+
+                # Measured (empty)
+                self.testpoints_table.setItem(i, 3, QTableWidgetItem(""))
+
+                # Status
+                self.testpoints_table.setItem(i, 4, QTableWidgetItem("Pending"))
+
+            # Select first test point
+            self._current_test_index = 0
+            self.testpoints_table.selectRow(0)
+            self._update_current_display(0)
+
+            self.status_display.append(f"Loaded {len(self._test_points)} test points from CSP")
+            self.status_display.append("=" * 40)
+            self.status_display.append("SESSION STARTED - Ready for first test point")
+            self.status_display.append("Enter reading and press Submit, or click 'Get Remote'")
+
+            # Enable control buttons
+            self.advance_btn.setEnabled(True)
+            self.pause_btn.setEnabled(True)
+            self.skip_btn.setEnabled(True)
+            self.redo_btn.setEnabled(True)
+            self.stop_btn.setEnabled(True)
+
+            # Flash the nominal display to draw attention
+            self.nominal_display.setStyleSheet(
+                "QLabel { background-color: #2d2d2d; color: #00ff00; "
+                "padding: 20px; border-radius: 10px; border: 3px solid #00ff00; }"
+            )
+
+            # Focus reading input
+            self._focus_reading_input()
+
+        except Exception as e:
+            logger.error(f"Failed to load test points from CSP: {e}")
+            self.status_display.append(f"ERROR loading CSP: {e}")
+            QMessageBox.critical(self, "Error", f"Failed to load procedure from CSP:\n{e}")
 
     def _load_sample_testpoints(self):
         """Load sample test points for demonstration (deprecated)."""
@@ -2179,11 +2325,45 @@ class ExecutionTab(QWidget):
         """Load and display wiring diagram for the current section.
 
         Priority:
-        1. Auto-lookup: calibrator_model + standard_section_type in library (BEST - no manual linking needed)
+        0. CSP embedded image (if loaded from .csp file) - HIGHEST PRIORITY
+        1. Auto-lookup: calibrator_model + standard_section_type in library
         2. Direct link via SectionDiagramLink (manual linking)
         3. Legacy WiringDiagram entry (direct section link)
         4. Fuzzy match from WiringDiagramLibrary (fallback)
         """
+        # 0. Check for CSP embedded image first
+        if self._current_csp_data and self._current_test_index >= 0:
+            tp = self._test_points[self._current_test_index]
+
+            # Get calibrator model for image lookup
+            cal_model = ""
+            if self._selected_calibrator:
+                cal_model = self._selected_calibrator.get('model', '')
+
+            # Try to find image by calibrator + section type
+            section_type = tp.get('standard_section_type') or tp.get('section_name')
+            if cal_model and section_type:
+                # Look for images/{cal_model}/{cal_model}_{dut}_{section}.png pattern
+                for img_path in self._current_csp_data.images.keys():
+                    # Check if image path matches calibrator and section
+                    if f"/{cal_model}/" in img_path or f"\\{cal_model}\\" in img_path:
+                        # Check section type match (case-insensitive, partial match)
+                        section_clean = section_type.replace(" ", "_").replace(" ", "")
+                        if section_clean.lower() in img_path.lower().replace(" ", "_"):
+                            image_data = self._current_csp_data.get_image(img_path)
+                            if image_data:
+                                logger.debug(f"Using CSP image by calibrator lookup: {img_path}")
+                                self._display_diagram_image(image_data)
+                                return
+
+            # Fall back to section-specific image
+            wiring_image_path = tp.get('section_wiring_image')
+            if wiring_image_path:
+                image_data = self._current_csp_data.get_image(wiring_image_path)
+                if image_data:
+                    logger.debug(f"Using CSP embedded image: {wiring_image_path}")
+                    self._display_diagram_image(image_data)
+                    return
         self.wiring_label.clear()
         self.wiring_label.setText("No wiring diagram available")
 

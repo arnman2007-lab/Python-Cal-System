@@ -22,6 +22,7 @@ from loguru import logger
 from calsystem.config.settings import get_settings
 from calsystem.database.connection import get_db
 from calsystem.database.models import ChangelogEntry
+from calsystem.procedures import sync_procedure_index
 
 
 class CalsystemApp(QMainWindow):
@@ -73,11 +74,22 @@ class CalsystemApp(QMainWindow):
             self.db_status_label.setStyleSheet("color: green;")
             # Update window title with current version from changelog
             self._update_window_title()
+            # Sync procedure index with .csp files on disk
+            self._sync_procedure_index()
             # Check for updates on startup if enabled
             self._check_for_updates_on_startup()
         else:
             self.db_status_label.setText("Database: Not Connected")
             self.db_status_label.setStyleSheet("color: red;")
+
+    def _sync_procedure_index(self):
+        """Sync procedure index with .csp files on disk."""
+        try:
+            added, updated, removed = sync_procedure_index()
+            if added or updated or removed:
+                logger.info(f"Procedure index synced: {added} added, {updated} updated, {removed} inactive")
+        except Exception as e:
+            logger.warning(f"Procedure index sync failed: {e}")
 
     def _check_for_updates_on_startup(self):
         """Check for updates on startup if enabled in settings."""

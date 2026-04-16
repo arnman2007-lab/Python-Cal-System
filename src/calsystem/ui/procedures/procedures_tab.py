@@ -48,6 +48,8 @@ from calsystem.database.models import (
     Standard, WorkstationStandard, WorkstationConfig, DeviceGroupType,
     WiringDiagramLibrary, SectionDiagramLink, STANDARD_SECTION_TYPES, get_all_section_types
 )
+from calsystem.config.settings import get_settings
+from calsystem.procedures import export_procedure_to_csp
 from calsystem.ui.dialogs.excel_import_dialog import ExcelImportDialog
 from calsystem.ui.dialogs.calibrator_selection_dialog import CalibratorSelectionDialog
 from calsystem.instruments.visa_manager import get_visa_manager, PYVISA_AVAILABLE, InstrumentInfo
@@ -418,6 +420,11 @@ class ProceduresTab(QWidget):
         self.save_btn = QPushButton("Save")
         self.save_btn.clicked.connect(self._on_save)
         toolbar.addWidget(self.save_btn)
+
+        self.export_csp_btn = QPushButton("Export CSP")
+        self.export_csp_btn.clicked.connect(self._on_export_csp)
+        self.export_csp_btn.setToolTip("Export procedure to .csp file")
+        toolbar.addWidget(self.export_csp_btn)
 
         toolbar.addStretch()
 
@@ -1987,12 +1994,65 @@ class ProceduresTab(QWidget):
                 self._current_procedure_id = procedure.id
 
             logger.info(f"Saved procedure: {name} (ID: {self._current_procedure_id})")
+
+            # Export to CSP file
+            self._export_current_to_csp()
+
             QMessageBox.information(self, "Saved", f"Procedure '{name}' saved successfully.")
             self._refresh_procedure_list()
 
         except Exception as e:
             logger.error(f"Failed to save procedure: {e}")
             QMessageBox.critical(self, "Error", f"Failed to save:\n{e}")
+
+    def _export_current_to_csp(self, show_message: bool = False):
+        """Export current procedure to .csp file.
+
+        Args:
+            show_message: If True, show success/failure message box
+        """
+        if not self._current_procedure_id:
+            if show_message:
+                QMessageBox.warning(self, "Export Error", "No procedure selected to export.")
+            return False
+
+        try:
+            # Get procedures directory from settings
+            settings = get_settings()
+            procedures_dir = settings.procedures_dir
+
+            # Export to CSP
+            success, message, file_path = export_procedure_to_csp(
+                procedure_id=self._current_procedure_id,
+                output_dir=procedures_dir,
+                include_images=True,
+                created_by=settings.technician_name or "Calsystem",
+            )
+
+            if success:
+                logger.info(f"Exported to CSP: {file_path}")
+                if show_message:
+                    QMessageBox.information(
+                        self,
+                        "Export Successful",
+                        f"Procedure exported to:\n{file_path}"
+                    )
+                return True
+            else:
+                logger.warning(f"CSP export failed: {message}")
+                if show_message:
+                    QMessageBox.warning(self, "Export Failed", f"Export failed:\n{message}")
+                return False
+
+        except Exception as e:
+            logger.error(f"Failed to export to CSP: {e}")
+            if show_message:
+                QMessageBox.critical(self, "Export Error", f"Failed to export:\n{e}")
+            return False
+
+    def _on_export_csp(self):
+        """Handle explicit Export CSP button click."""
+        self._export_current_to_csp(show_message=True)
 
     def _refresh_procedure_list(self):
         """Refresh the procedure list from database."""

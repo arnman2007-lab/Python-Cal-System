@@ -114,6 +114,7 @@ class Settings(BaseSettings):
     data_dir: Path = Field(default_factory=lambda: Path.home() / ".calsystem" / "data")
     log_dir: Path = Field(default_factory=lambda: Path.home() / ".calsystem" / "logs")
     diagrams_dir: Path = Field(default_factory=lambda: Path.home() / ".calsystem" / "diagrams")
+    procedures_dir: Path = Field(default_factory=lambda: Path.home() / ".calsystem" / "procedures")
 
     # Company info (for reports)
     company_name: str = ""
@@ -156,6 +157,7 @@ class Settings(BaseSettings):
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.diagrams_dir.mkdir(parents=True, exist_ok=True)
+        self.procedures_dir.mkdir(parents=True, exist_ok=True)
 
 
 @lru_cache

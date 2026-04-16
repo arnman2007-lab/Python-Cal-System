@@ -367,6 +367,12 @@ class Procedure(Base):
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
+    # CSP file support (new file-based procedure storage)
+    file_path = Column(String(500), nullable=True, comment="Path to .csp procedure file")
+    section_count = Column(Integer, nullable=True, comment="Quick reference: number of sections")
+    test_point_count = Column(Integer, nullable=True, comment="Quick reference: total test points")
+    file_hash = Column(String(64), nullable=True, comment="SHA-256 hash for change detection")
+
     # Relationships
     sections = relationship(
         "TestSection", back_populates="procedure", order_by="TestSection.order"
