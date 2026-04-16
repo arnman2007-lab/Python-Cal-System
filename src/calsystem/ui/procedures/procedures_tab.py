@@ -2238,11 +2238,16 @@ class ProceduresTab(QWidget):
                     TestSection.procedure_id == self._current_procedure_id
                 ).count()
 
+                # Default section commands for all new sections
+                import json
+                default_commands = json.dumps(["Reset", "Standby"])
+
                 section = TestSection(
                     procedure_id=self._current_procedure_id,
                     name=name,
                     standard_section_type=standard_type or None,
                     order=max_order,
+                    section_command=default_commands,
                 )
                 session.add(section)
                 session.flush()
@@ -2661,9 +2666,13 @@ class ProceduresTab(QWidget):
         return json.dumps(commands) if commands else None
 
     def _set_section_commands_from_json(self, json_str: str):
-        """Load section commands from JSON string."""
+        """Load section commands from JSON string. Uses defaults if empty."""
         import json
         self.section_cmd_list.clear()
+
+        # Default commands for all sections
+        default_commands = ["Reset", "Standby"]
+
         if json_str:
             try:
                 commands = json.loads(json_str)
@@ -2676,6 +2685,10 @@ class ProceduresTab(QWidget):
             except json.JSONDecodeError:
                 # Legacy: plain string command
                 self.section_cmd_list.addItem(json_str)
+        else:
+            # No commands set - populate with defaults
+            for cmd in default_commands:
+                self.section_cmd_list.addItem(cmd)
 
     def _save_current_section(self):
         """Save the current section details from the form."""
