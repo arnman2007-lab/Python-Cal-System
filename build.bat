@@ -67,7 +67,7 @@ if errorlevel 1 (
 REM Install the package itself
 echo.
 echo [4/5] Installing Calsystem package...
-pip install -e "%SCRIPT_DIR%"
+pip install -e "%SCRIPT_DIR%."
 if errorlevel 1 (
     echo ERROR: Failed to install Calsystem package
     pause
