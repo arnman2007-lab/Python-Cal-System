@@ -234,6 +234,7 @@ def _convert_test_point(tp: TestPoint) -> TestPointData:
         pass_fail_min=getattr(tp, 'pass_fail_min', None),
         pass_fail_max=getattr(tp, 'pass_fail_max', None),
         pass_fail_range_unit=getattr(tp, 'pass_fail_range_unit', None),
+        pass_fail_comparison_type=getattr(tp, 'pass_fail_comparison_type', None),
 
         # Commands
         source_command=tp.source_command,

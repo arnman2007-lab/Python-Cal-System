@@ -1082,18 +1082,18 @@ class ProceduresTab(QWidget):
         delay_layout.addStretch()
         core_layout.addRow("Delay:", delay_layout)
 
-        # Reading format (decimal places)
+        # Reading format (multiplier/divider for raw value)
         self.dmm_reading_format_combo = QComboBox()
         self.dmm_reading_format_combo.addItems([
-            "Match Test Point",
-            "0.0 (1 decimal)",
-            "0.00 (2 decimals)",
-            "0.000 (3 decimals)",
-            "0.0000 (4 decimals)",
-            "0.00000 (5 decimals)",
-            "0.000000 (6 decimals)",
+            "x1 (no change)",
+            "x10",
+            "x100",
+            "x1000",
+            "/10",
+            "/100",
+            "/1000",
         ])
-        self.dmm_reading_format_combo.setToolTip("How to format the reading display")
+        self.dmm_reading_format_combo.setToolTip("Multiplier/divider to apply to raw DMM reading")
         core_layout.addRow("Reading Format:", self.dmm_reading_format_combo)
 
         dmm_layout.addWidget(core_group)
@@ -1397,13 +1397,16 @@ class ProceduresTab(QWidget):
 
         self.dmm_delay_input.setValue(float(config.get("delay", 0)))
 
-        # Reading format
-        reading_format = config.get("reading_format", "Match Test Point")
+        # Reading format (multiplier)
+        reading_format = config.get("reading_format", "x1 (no change)")
+        # Handle legacy "Match Test Point" values
+        if reading_format.startswith("Match") or reading_format.startswith("0."):
+            reading_format = "x1 (no change)"
         idx = self.dmm_reading_format_combo.findText(reading_format, Qt.MatchFlag.MatchStartsWith)
         if idx >= 0:
             self.dmm_reading_format_combo.setCurrentIndex(idx)
         else:
-            self.dmm_reading_format_combo.setCurrentIndex(0)  # Default to "Match Test Point"
+            self.dmm_reading_format_combo.setCurrentIndex(0)  # Default to "x1 (no change)"
 
         # Optional settings - new format
         optional_settings = config.get("optional_settings", [])
@@ -1486,7 +1489,7 @@ class ProceduresTab(QWidget):
         self._on_dmm_func_changed("DCV")
         self.dmm_range_combo.setCurrentText("AUTO")
         self.dmm_delay_input.setValue(0)
-        self.dmm_reading_format_combo.setCurrentIndex(0)  # "Match Test Point"
+        self.dmm_reading_format_combo.setCurrentIndex(0)  # "x1 (no change)"
         self.dmm_optional_table.setRowCount(0)
         self.dmm_commands_table.setRowCount(0)
 
@@ -1530,46 +1533,87 @@ class ProceduresTab(QWidget):
 
         prompt_layout.addWidget(prompt_group)
 
-        # Range check section (for DMM value checks)
-        range_group = QGroupBox("Range Check (Optional)")
-        range_layout = QFormLayout(range_group)
+        # Value check section (for DMM value checks)
+        check_group = QGroupBox("Value Check (Optional)")
+        check_layout = QVBoxLayout(check_group)
 
-        range_help = QLabel("If using DMM, check if reading falls within min/max range")
-        range_help.setStyleSheet("color: gray; font-size: 10px;")
-        range_layout.addRow(range_help)
+        check_help = QLabel("If using DMM, automatically check the reading against limits")
+        check_help.setStyleSheet("color: gray; font-size: 10px;")
+        check_layout.addWidget(check_help)
 
-        # Min value
-        min_layout = QHBoxLayout()
+        # Tab widget for different comparison types
+        self.pass_fail_check_tabs = QTabWidget()
+        self.pass_fail_check_tabs.setMaximumHeight(100)
+
+        # Tab 1: Range Check (between min and max)
+        range_tab = QWidget()
+        range_tab_layout = QFormLayout(range_tab)
+        range_tab_layout.setContentsMargins(8, 8, 8, 8)
+
         self.pass_fail_min_input = QDoubleSpinBox()
         self.pass_fail_min_input.setRange(-999999, 999999)
         self.pass_fail_min_input.setDecimals(6)
-        self.pass_fail_min_input.setSpecialValueText("No minimum")
+        self.pass_fail_min_input.setSpecialValueText("Not set")
         self.pass_fail_min_input.setValue(self.pass_fail_min_input.minimum())
-        min_layout.addWidget(self.pass_fail_min_input)
-        min_layout.addStretch()
-        range_layout.addRow("Min Value:", min_layout)
+        range_tab_layout.addRow("Min:", self.pass_fail_min_input)
 
-        # Max value
-        max_layout = QHBoxLayout()
         self.pass_fail_max_input = QDoubleSpinBox()
         self.pass_fail_max_input.setRange(-999999, 999999)
         self.pass_fail_max_input.setDecimals(6)
-        self.pass_fail_max_input.setSpecialValueText("No maximum")
+        self.pass_fail_max_input.setSpecialValueText("Not set")
         self.pass_fail_max_input.setValue(self.pass_fail_max_input.minimum())
-        max_layout.addWidget(self.pass_fail_max_input)
-        max_layout.addStretch()
-        range_layout.addRow("Max Value:", max_layout)
+        range_tab_layout.addRow("Max:", self.pass_fail_max_input)
 
-        # Unit for range
+        self.pass_fail_check_tabs.addTab(range_tab, "Range")
+
+        # Tab 2: Greater Than
+        gt_tab = QWidget()
+        gt_tab_layout = QFormLayout(gt_tab)
+        gt_tab_layout.setContentsMargins(8, 8, 8, 8)
+
+        self.pass_fail_gt_input = QDoubleSpinBox()
+        self.pass_fail_gt_input.setRange(-999999, 999999)
+        self.pass_fail_gt_input.setDecimals(6)
+        self.pass_fail_gt_input.setSpecialValueText("Not set")
+        self.pass_fail_gt_input.setValue(self.pass_fail_gt_input.minimum())
+        gt_tab_layout.addRow("Value >", self.pass_fail_gt_input)
+
+        gt_help = QLabel("Pass if reading is strictly greater than this value")
+        gt_help.setStyleSheet("color: gray; font-size: 10px;")
+        gt_tab_layout.addRow(gt_help)
+
+        self.pass_fail_check_tabs.addTab(gt_tab, "Greater Than")
+
+        # Tab 3: Less Than
+        lt_tab = QWidget()
+        lt_tab_layout = QFormLayout(lt_tab)
+        lt_tab_layout.setContentsMargins(8, 8, 8, 8)
+
+        self.pass_fail_lt_input = QDoubleSpinBox()
+        self.pass_fail_lt_input.setRange(-999999, 999999)
+        self.pass_fail_lt_input.setDecimals(6)
+        self.pass_fail_lt_input.setSpecialValueText("Not set")
+        self.pass_fail_lt_input.setValue(self.pass_fail_lt_input.minimum())
+        lt_tab_layout.addRow("Value <", self.pass_fail_lt_input)
+
+        lt_help = QLabel("Pass if reading is strictly less than this value")
+        lt_help.setStyleSheet("color: gray; font-size: 10px;")
+        lt_tab_layout.addRow(lt_help)
+
+        self.pass_fail_check_tabs.addTab(lt_tab, "Less Than")
+
+        check_layout.addWidget(self.pass_fail_check_tabs)
+
+        # Unit dropdown (shared across all tabs)
+        unit_layout = QHBoxLayout()
+        unit_layout.addWidget(QLabel("Unit:"))
         self.pass_fail_range_unit = QComboBox()
         self.pass_fail_range_unit.addItems(["V", "mV", "uV", "A", "mA", "uA", "Ohm", "kOhm", "MOhm", "Hz", "kHz", "MHz"])
-        range_layout.addRow("Unit:", self.pass_fail_range_unit)
+        unit_layout.addWidget(self.pass_fail_range_unit)
+        unit_layout.addStretch()
+        check_layout.addLayout(unit_layout)
 
-        range_example = QLabel("Example: Min=4.9, Max=5.1, Unit=V → Pass if reading is 4.9V to 5.1V")
-        range_example.setStyleSheet("color: gray; font-size: 10px;")
-        range_layout.addRow(range_example)
-
-        prompt_layout.addWidget(range_group)
+        prompt_layout.addWidget(check_group)
 
         # Preview button
         preview_layout = QHBoxLayout()
@@ -1693,9 +1737,12 @@ class ProceduresTab(QWidget):
         self.tolerance_input.setValue(0)
         self.pass_fail_prompt_input.clear()
         self.operational_check_input.clear()
-        # Pass/Fail range check fields
+        # Pass/Fail value check fields
+        self.pass_fail_check_tabs.setCurrentIndex(0)  # Default to Range tab
         self.pass_fail_min_input.setValue(self.pass_fail_min_input.minimum())
         self.pass_fail_max_input.setValue(self.pass_fail_max_input.minimum())
+        self.pass_fail_gt_input.setValue(self.pass_fail_gt_input.minimum())
+        self.pass_fail_lt_input.setValue(self.pass_fail_lt_input.minimum())
         self.pass_fail_range_unit.setCurrentIndex(0)
         # Pre-conditioning fields
         self.pre_nominal_input.setValue(0)
@@ -3058,16 +3105,36 @@ class ProceduresTab(QWidget):
                 # Update tolerance preview
                 self._update_tolerance_preview()
 
-                # Pass/Fail prompt and range
+                # Pass/Fail prompt and value check
                 self.pass_fail_prompt_input.setText(tp.pass_fail_prompt or "")
-                if tp.pass_fail_min is not None:
-                    self.pass_fail_min_input.setValue(tp.pass_fail_min)
+
+                # Reset all value check inputs
+                self.pass_fail_min_input.setValue(self.pass_fail_min_input.minimum())
+                self.pass_fail_max_input.setValue(self.pass_fail_max_input.minimum())
+                self.pass_fail_gt_input.setValue(self.pass_fail_gt_input.minimum())
+                self.pass_fail_lt_input.setValue(self.pass_fail_lt_input.minimum())
+
+                # Load based on comparison type
+                comparison_type = tp.pass_fail_comparison_type
+                if comparison_type == 'gt':
+                    # Greater Than mode
+                    self.pass_fail_check_tabs.setCurrentIndex(1)
+                    if tp.pass_fail_min is not None:
+                        self.pass_fail_gt_input.setValue(tp.pass_fail_min)
+                elif comparison_type == 'lt':
+                    # Less Than mode
+                    self.pass_fail_check_tabs.setCurrentIndex(2)
+                    if tp.pass_fail_max is not None:
+                        self.pass_fail_lt_input.setValue(tp.pass_fail_max)
                 else:
-                    self.pass_fail_min_input.setValue(self.pass_fail_min_input.minimum())
-                if tp.pass_fail_max is not None:
-                    self.pass_fail_max_input.setValue(tp.pass_fail_max)
-                else:
-                    self.pass_fail_max_input.setValue(self.pass_fail_max_input.minimum())
+                    # Range mode (default)
+                    self.pass_fail_check_tabs.setCurrentIndex(0)
+                    if tp.pass_fail_min is not None:
+                        self.pass_fail_min_input.setValue(tp.pass_fail_min)
+                    if tp.pass_fail_max is not None:
+                        self.pass_fail_max_input.setValue(tp.pass_fail_max)
+
+                # Load unit
                 if tp.pass_fail_range_unit:
                     idx = self.pass_fail_range_unit.findText(tp.pass_fail_range_unit)
                     if idx >= 0:
@@ -3204,21 +3271,55 @@ class ProceduresTab(QWidget):
                     tp.tolerance_value = self.tol_absolute_input.value()
                     tp.tolerance_type = ToleranceType.ABSOLUTE
 
-                # Pass/Fail prompt and range
+                # Pass/Fail prompt and value check
                 tp.pass_fail_prompt = self.pass_fail_prompt_input.toPlainText().strip() or None
-                # Only save range if values are set (not at minimum/special value)
-                min_val = self.pass_fail_min_input.value()
-                max_val = self.pass_fail_max_input.value()
-                if min_val > self.pass_fail_min_input.minimum():
-                    tp.pass_fail_min = min_val
-                else:
-                    tp.pass_fail_min = None
-                if max_val > self.pass_fail_max_input.minimum():
-                    tp.pass_fail_max = max_val
-                else:
-                    tp.pass_fail_max = None
-                # Only save unit if at least one range value is set
-                if tp.pass_fail_min is not None or tp.pass_fail_max is not None:
+
+                # Determine comparison type and save values based on selected tab
+                current_tab = self.pass_fail_check_tabs.currentIndex()
+                has_value = False
+
+                if current_tab == 0:
+                    # Range mode
+                    min_val = self.pass_fail_min_input.value()
+                    max_val = self.pass_fail_max_input.value()
+                    if min_val > self.pass_fail_min_input.minimum():
+                        tp.pass_fail_min = min_val
+                        has_value = True
+                    else:
+                        tp.pass_fail_min = None
+                    if max_val > self.pass_fail_max_input.minimum():
+                        tp.pass_fail_max = max_val
+                        has_value = True
+                    else:
+                        tp.pass_fail_max = None
+                    tp.pass_fail_comparison_type = 'range' if has_value else None
+                elif current_tab == 1:
+                    # Greater Than mode
+                    gt_val = self.pass_fail_gt_input.value()
+                    if gt_val > self.pass_fail_gt_input.minimum():
+                        tp.pass_fail_min = gt_val  # Store threshold in min field
+                        tp.pass_fail_max = None
+                        tp.pass_fail_comparison_type = 'gt'
+                        has_value = True
+                    else:
+                        tp.pass_fail_min = None
+                        tp.pass_fail_max = None
+                        tp.pass_fail_comparison_type = None
+                elif current_tab == 2:
+                    # Less Than mode
+                    lt_val = self.pass_fail_lt_input.value()
+                    if lt_val > self.pass_fail_lt_input.minimum():
+                        tp.pass_fail_min = None
+                        tp.pass_fail_max = lt_val  # Store threshold in max field
+                        tp.pass_fail_comparison_type = 'lt'
+                        has_value = True
+                    else:
+                        tp.pass_fail_min = None
+                        tp.pass_fail_max = None
+                        tp.pass_fail_comparison_type = None
+
+                # Only save unit if a value check is configured
+                if has_value:
                     tp.pass_fail_range_unit = self.pass_fail_range_unit.currentText()
                 else:
                     tp.pass_fail_range_unit = None
@@ -3269,13 +3370,16 @@ class ProceduresTab(QWidget):
                 formula_text = self.formula_input.text().strip()
                 tp.formula = formula_text if formula_text else None
 
-                # DMM configuration - save if test type uses DMM or Pass/Fail with range check
+                # DMM configuration - save if test type uses DMM or Pass/Fail with value check
                 test_type_index = self.test_type_combo.currentIndex()
-                # Check if Pass/Fail has range check configured
-                has_range_check = (
+                # Check if Pass/Fail has any value check configured (range, gt, or lt)
+                has_value_check = (
                     self.pass_fail_min_input.value() > self.pass_fail_min_input.minimum() or
-                    self.pass_fail_max_input.value() > self.pass_fail_max_input.minimum()
+                    self.pass_fail_max_input.value() > self.pass_fail_max_input.minimum() or
+                    self.pass_fail_gt_input.value() > self.pass_fail_gt_input.minimum() or
+                    self.pass_fail_lt_input.value() > self.pass_fail_lt_input.minimum()
                 )
+                has_range_check = has_value_check  # Keep variable name for compatibility
                 if test_type_index in [1, 3, 4] or has_range_check:  # Pass/Fail, DMM Measurement, or Calibrator + DMM
                     tp.dmm_config = self._save_dmm_config()
                 else:
@@ -4055,46 +4159,49 @@ class ProceduresTab(QWidget):
             expected_value = self.nominal_input.value()
             expected_unit = self.unit_combo.currentText()
 
-            # Convert reading to match test point unit
+            # Apply multiplier/divider from reading format dropdown
             try:
                 raw_value = float(reading)
 
-                # Unit conversion multipliers (from base unit to display unit)
-                # DMM returns in base units (V, A, Ohm, Hz)
-                unit_divisors = {
-                    "mV": 0.001, "uV": 0.000001, "kV": 1000,
-                    "mA": 0.001, "uA": 0.000001,
-                    "kOhm": 1000, "MOhm": 1000000,
-                    "kHz": 1000, "MHz": 1000000,
-                    "V": 1, "A": 1, "Ohm": 1, "Hz": 1,
-                }
-
-                divisor = unit_divisors.get(expected_unit, 1.0)
-                converted_value = raw_value / divisor
-
-                # Get decimal places from dropdown
+                # Get multiplier from dropdown selection
                 format_selection = self.dmm_reading_format_combo.currentText()
-                if format_selection.startswith("Match"):
-                    # Auto-determine based on expected value magnitude
-                    if expected_value >= 100:
-                        decimals = 2
-                    elif expected_value >= 10:
-                        decimals = 3
-                    elif expected_value >= 1:
-                        decimals = 4
-                    else:
-                        decimals = 5
-                else:
-                    # Parse decimal count from selection (e.g., "0.0000 (4 decimals)" -> 4)
-                    decimals = format_selection.count('0') - 1  # Count zeros after decimal
+                multiplier = 1.0
+                if format_selection.startswith("x"):
+                    # Extract number after 'x' (e.g., "x1000" -> 1000)
+                    try:
+                        mult_str = format_selection.split()[0][1:]  # Remove 'x' prefix
+                        multiplier = float(mult_str)
+                    except:
+                        multiplier = 1.0
+                elif format_selection.startswith("/"):
+                    # Extract number after '/' (e.g., "/1000" -> divide by 1000)
+                    try:
+                        div_str = format_selection.split()[0][1:]  # Remove '/' prefix
+                        multiplier = 1.0 / float(div_str)
+                    except:
+                        multiplier = 1.0
 
-                formatted_reading = f"{converted_value:.{decimals}f} {expected_unit}"
+                adjusted_value = raw_value * multiplier
+
+                # Auto-determine decimal places based on value magnitude
+                if abs(adjusted_value) >= 100:
+                    decimals = 2
+                elif abs(adjusted_value) >= 10:
+                    decimals = 3
+                elif abs(adjusted_value) >= 1:
+                    decimals = 4
+                else:
+                    decimals = 6
+
+                formatted_reading = f"{adjusted_value:.{decimals}f} {expected_unit}"
+                multiplier_text = format_selection.split()[0]  # e.g., "x1000" or "/100"
 
                 QMessageBox.information(
                     self, "DMM Test Reading",
                     f"DMM ({dmm_info}) returned:\n\n"
-                    f"   {formatted_reading}\n"
-                    f"   (raw: {reading})\n\n"
+                    f"   Raw: {reading}\n"
+                    f"   Multiplier: {multiplier_text}\n"
+                    f"   Adjusted: {formatted_reading}\n\n"
                     f"   Expected: {expected_value} {expected_unit}\n\n"
                     f"Setup commands sent:\n" + "\n".join(f"   {c}" for c in success_cmds)
                 )
@@ -4222,21 +4329,33 @@ class ProceduresTab(QWidget):
         if not prompt_text:
             prompt_text = "(No prompt entered)"
 
-        # Get range check info
-        min_val = self.pass_fail_min_input.value()
-        max_val = self.pass_fail_max_input.value()
-        has_min = min_val > self.pass_fail_min_input.minimum()
-        has_max = max_val > self.pass_fail_max_input.minimum()
+        # Get value check info based on selected tab
+        current_tab = self.pass_fail_check_tabs.currentIndex()
         range_unit = self.pass_fail_range_unit.currentText()
-
         range_text = ""
-        if has_min or has_max:
+
+        if current_tab == 0:
+            # Range mode
+            min_val = self.pass_fail_min_input.value()
+            max_val = self.pass_fail_max_input.value()
+            has_min = min_val > self.pass_fail_min_input.minimum()
+            has_max = max_val > self.pass_fail_max_input.minimum()
             if has_min and has_max:
                 range_text = f"Expected range: {min_val} to {max_val} {range_unit}"
             elif has_min:
-                range_text = f"Minimum: {min_val} {range_unit}"
-            else:
-                range_text = f"Maximum: {max_val} {range_unit}"
+                range_text = f"Minimum: >= {min_val} {range_unit}"
+            elif has_max:
+                range_text = f"Maximum: <= {max_val} {range_unit}"
+        elif current_tab == 1:
+            # Greater Than mode
+            gt_val = self.pass_fail_gt_input.value()
+            if gt_val > self.pass_fail_gt_input.minimum():
+                range_text = f"Must be greater than: > {gt_val} {range_unit}"
+        elif current_tab == 2:
+            # Less Than mode
+            lt_val = self.pass_fail_lt_input.value()
+            if lt_val > self.pass_fail_lt_input.minimum():
+                range_text = f"Must be less than: < {lt_val} {range_unit}"
 
         # Get wiring diagram (from Advanced tab)
         wiring_type = self.wiring_combo.currentText()

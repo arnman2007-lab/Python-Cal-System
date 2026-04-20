@@ -685,3 +685,86 @@
 - Config field mismatches cause "Extra inputs not permitted" errors
 
 ---
+
+## 2026-04-17 - Pass/Fail Enhancements & Safety Features (Version 0.8.0)
+
+### 1. Greater Than / Less Than Comparison Modes for Pass/Fail
+- **What was implemented:**
+  - Replaced Range Check group box with QTabWidget containing 3 tabs:
+    - **Range Check tab**: Value must be between min and max (existing behavior)
+    - **Greater Than tab**: Value must be > threshold (single spinbox)
+    - **Less Than tab**: Value must be < threshold (single spinbox)
+  - Added `pass_fail_comparison_type` column to TestPoint model ('range', 'gt', 'lt')
+  - Updated CSP serialization (procedure_data.py) to include comparison type
+  - Updated migration.py for CSP export
+  - Execution tab updated to handle all three comparison types
+  - PassFailWithReadingDialog updated to show correct limits text:
+    - Range: "4.9 to 5.1 V"
+    - Greater Than: "> 5.0 V"
+    - Less Than: "< 5.0 V"
+- **Files changed:**
+  - src/calsystem/database/models.py (pass_fail_comparison_type column)
+  - src/calsystem/procedures/procedure_data.py (CSP support)
+  - src/calsystem/procedures/migration.py (export mapping)
+  - src/calsystem/ui/procedures/procedures_tab.py (tab widget UI)
+  - src/calsystem/ui/execution/execution_tab.py (comparison logic)
+
+### 2. Safety Reset on Test Point Jump
+- **What was implemented:**
+  - Added `_reset_all_workstation_standards()` method to execution_tab.py
+  - When double-clicking to jump to a test point during a session:
+    1. Reset commands sent IMMEDIATELY (before any dialogs)
+    2. Queries all active workstation standards
+    3. Looks up Reset command from CommandBank (or uses *RST fallback)
+    4. Sends reset to each standard
+  - Status display shows "SAFETY: Resetting workstation standards..."
+  - Prevents shock hazard if calibrator was sourcing high voltage
+- **Files changed:**
+  - src/calsystem/ui/execution/execution_tab.py
+- **Bug fixed:**
+  - Originally used `command_bank.mappings` but correct attribute is `command_bank.commands`
+  - Originally called reset AFTER section change dialog; moved to BEFORE any dialogs
+
+### 3. Current Test Point UI Redesign
+- **What was implemented:**
+  - Removed redundant "Section:", "Test Point:", "Tolerance:" labels below black container
+  - Expanded black display box to fill the Current Test Point container
+  - Combined Section + Test Point into single line: "Section Name / Test Point Name"
+  - Added `_auto_size_section_label()` method for dynamic font sizing:
+    - < 25 chars: 28px (large)
+    - 25-40 chars: 22px (default)
+    - 40-60 chars: 18px (smaller)
+    - > 60 chars: 14px (minimum)
+  - Nominal value displayed below in yellow (32px)
+  - Tolerance info in gray (14px)
+- **Files changed:**
+  - src/calsystem/ui/execution/execution_tab.py
+
+### 4. DMM Reading Format Multipliers
+- **What was implemented:**
+  - Changed Reading Format dropdown from decimal places to multipliers:
+    - `x1 (no change)` - raw value unchanged
+    - `x10`, `x100`, `x1000` - multiply raw value
+    - `/10`, `/100`, `/1000` - divide raw value
+  - Procedures tab: Test DMM button shows raw value, multiplier, and adjusted value
+  - Execution tab: Pass/Fail tests apply multiplier before comparison
+  - Handles legacy "Match Test Point" values by defaulting to x1
+- **Files changed:**
+  - src/calsystem/ui/procedures/procedures_tab.py (dropdown and test logic)
+  - src/calsystem/ui/execution/execution_tab.py (apply multiplier in Pass/Fail)
+- **Use case:**
+  - If DMM returns 0.005 but you need 5.0, select x1000
+  - Common when DMM returns values in different scale than expected
+
+### Database Changes
+- Added `pass_fail_comparison_type` column to test_points table (String(10), nullable)
+- Run ALTER TABLE if upgrading existing database
+
+### Learnings
+- CommandBank model uses `commands` attribute, not `mappings`
+- Safety-critical operations (reset) should happen BEFORE any user dialogs
+- QTabWidget useful for mutually exclusive options (comparison types)
+- Multiplier parsing: split()[0] to get "x1000" from "x1000 (description)"
+- Reading format stored in dmm_config JSON dict, automatically serialized
+
+---

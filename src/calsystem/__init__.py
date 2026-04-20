@@ -6,5 +6,5 @@ test equipment, devices under test, calibration procedures, and generating
 professional reports.
 """
 
-__version__ = "0.6.0"
+__version__ = "0.8.0"
 __author__ = "Calibration Lab"

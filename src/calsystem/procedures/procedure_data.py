@@ -59,6 +59,7 @@ class TestPointData:
     pass_fail_min: Optional[float] = None
     pass_fail_max: Optional[float] = None
     pass_fail_range_unit: Optional[str] = None
+    pass_fail_comparison_type: Optional[str] = None  # 'range', 'gt', 'lt'
 
     # Commands
     source_command: Optional[str] = None
@@ -114,6 +115,7 @@ class TestPointData:
             "pass_fail_min": self.pass_fail_min,
             "pass_fail_max": self.pass_fail_max,
             "pass_fail_range_unit": self.pass_fail_range_unit,
+            "pass_fail_comparison_type": self.pass_fail_comparison_type,
             "source_command": self.source_command,
             "measure_command": self.measure_command,
             "operate_command": self.operate_command,
@@ -161,6 +163,7 @@ class TestPointData:
             pass_fail_min=data.get("pass_fail_min"),
             pass_fail_max=data.get("pass_fail_max"),
             pass_fail_range_unit=data.get("pass_fail_range_unit"),
+            pass_fail_comparison_type=data.get("pass_fail_comparison_type"),
             source_command=data.get("source_command"),
             measure_command=data.get("measure_command"),
             operate_command=data.get("operate_command"),

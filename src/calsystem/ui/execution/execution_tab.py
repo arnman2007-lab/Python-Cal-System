@@ -144,6 +144,349 @@ class PassFailDialog(QDialog):
         return self._result
 
 
+class PassFailWithReadingDialog(QDialog):
+    """Dialog for Pass/Fail test with DMM reading and limits checking."""
+
+    def __init__(self, prompt: str, test_info: str, reading: Optional[float],
+                 min_val: Optional[float], max_val: Optional[float],
+                 unit: str = "", comparison_type: str = "range", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Pass/Fail Verification")
+        self.setModal(True)
+        self.setMinimumWidth(450)
+
+        self._result: Optional[bool] = None
+        self._reading = reading
+
+        layout = QVBoxLayout(self)
+
+        # Test info
+        info_label = QLabel(test_info)
+        info_label.setStyleSheet("font-weight: bold; font-size: 14px;")
+        info_label.setWordWrap(True)
+        layout.addWidget(info_label)
+
+        layout.addSpacing(10)
+
+        # Prompt message
+        prompt_label = QLabel(prompt or "Verify the reading is within limits:")
+        prompt_label.setStyleSheet("font-size: 14px;")
+        prompt_label.setWordWrap(True)
+        layout.addWidget(prompt_label)
+
+        layout.addSpacing(10)
+
+        # DMM Reading display
+        reading_frame = QFrame()
+        reading_frame.setFrameStyle(QFrame.Shape.Box | QFrame.Shadow.Sunken)
+        reading_layout = QVBoxLayout(reading_frame)
+
+        if reading is not None:
+            reading_str = f"{reading:.6g} {unit}".strip()
+            reading_label = QLabel(reading_str)
+            reading_label.setStyleSheet("font-size: 24px; font-weight: bold; color: #0066cc;")
+            reading_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        else:
+            reading_label = QLabel("No DMM Reading")
+            reading_label.setStyleSheet("font-size: 18px; color: #999;")
+            reading_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        reading_layout.addWidget(reading_label)
+
+        # Show limits based on comparison type
+        limits_str = "Limits: "
+        if comparison_type == 'gt':
+            limits_str += f"> {min_val:.6g} {unit}".strip() if min_val is not None else "None specified"
+        elif comparison_type == 'lt':
+            limits_str += f"< {max_val:.6g} {unit}".strip() if max_val is not None else "None specified"
+        elif min_val is not None and max_val is not None:
+            limits_str += f"{min_val:.6g} to {max_val:.6g} {unit}".strip()
+        elif min_val is not None:
+            limits_str += f">= {min_val:.6g} {unit}".strip()
+        elif max_val is not None:
+            limits_str += f"<= {max_val:.6g} {unit}".strip()
+        else:
+            limits_str += "None specified"
+
+        limits_label = QLabel(limits_str)
+        limits_label.setStyleSheet("font-size: 12px; color: #666;")
+        limits_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        reading_layout.addWidget(limits_label)
+
+        # Auto-determined result based on comparison type
+        auto_pass = None
+        if reading is not None:
+            in_range = True
+            if comparison_type == 'gt':
+                # Greater Than: must be strictly greater
+                if min_val is not None and reading <= min_val:
+                    in_range = False
+            elif comparison_type == 'lt':
+                # Less Than: must be strictly less
+                if max_val is not None and reading >= max_val:
+                    in_range = False
+            else:
+                # Range: between min and max (inclusive)
+                if min_val is not None and reading < min_val:
+                    in_range = False
+                if max_val is not None and reading > max_val:
+                    in_range = False
+            auto_pass = in_range
+
+            auto_label = QLabel(f"Auto Result: {'PASS' if auto_pass else 'FAIL'}")
+            auto_label.setStyleSheet(
+                f"font-size: 14px; font-weight: bold; color: {'#28a745' if auto_pass else '#dc3545'};"
+            )
+            auto_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            reading_layout.addWidget(auto_label)
+
+        layout.addWidget(reading_frame)
+        layout.addSpacing(15)
+
+        # Pass/Fail buttons
+        button_layout = QHBoxLayout()
+
+        self.fail_btn = QPushButton("FAIL")
+        self.fail_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #dc3545;
+                color: white;
+                font-size: 18px;
+                font-weight: bold;
+                padding: 15px 40px;
+                border-radius: 5px;
+            }
+            QPushButton:hover {
+                background-color: #c82333;
+            }
+        """)
+        self.fail_btn.clicked.connect(self._on_fail)
+        button_layout.addWidget(self.fail_btn)
+
+        button_layout.addSpacing(20)
+
+        self.pass_btn = QPushButton("PASS")
+        self.pass_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #28a745;
+                color: white;
+                font-size: 18px;
+                font-weight: bold;
+                padding: 15px 40px;
+                border-radius: 5px;
+            }
+            QPushButton:hover {
+                background-color: #218838;
+            }
+        """)
+        self.pass_btn.clicked.connect(self._on_pass)
+        button_layout.addWidget(self.pass_btn)
+
+        layout.addLayout(button_layout)
+
+        # If auto-determined, pre-select the appropriate button
+        if auto_pass is not None:
+            if auto_pass:
+                self.pass_btn.setFocus()
+            else:
+                self.fail_btn.setFocus()
+
+    def _on_pass(self):
+        self._result = True
+        self.accept()
+
+    def _on_fail(self):
+        self._result = False
+        self.accept()
+
+    def get_result(self) -> Optional[bool]:
+        """Returns True for Pass, False for Fail, None if cancelled."""
+        return self._result
+
+    def get_reading(self) -> Optional[float]:
+        """Returns the DMM reading."""
+        return self._reading
+
+
+class WiringPromptDialog(QDialog):
+    """Dialog showing wiring instructions before a measurement."""
+
+    def __init__(self, prompt: str, test_info: str, wiring_image: Optional[QPixmap] = None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Wiring Instructions")
+        self.setModal(True)
+        self.setMinimumWidth(500)
+
+        layout = QVBoxLayout(self)
+
+        # Test info header
+        info_label = QLabel(test_info)
+        info_label.setStyleSheet("font-weight: bold; font-size: 14px;")
+        info_label.setWordWrap(True)
+        layout.addWidget(info_label)
+
+        layout.addSpacing(10)
+
+        # Wiring image (if provided)
+        if wiring_image and not wiring_image.isNull():
+            image_label = QLabel()
+            # Scale image to fit dialog
+            scaled = wiring_image.scaledToWidth(450, Qt.TransformationMode.SmoothTransformation)
+            image_label.setPixmap(scaled)
+            image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            layout.addWidget(image_label)
+            layout.addSpacing(10)
+
+        # Instructions
+        prompt_label = QLabel(prompt or "Wire the DUT to the DMM as shown, then click Next.")
+        prompt_label.setStyleSheet("font-size: 14px;")
+        prompt_label.setWordWrap(True)
+        prompt_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(prompt_label)
+
+        layout.addSpacing(20)
+
+        # Next button
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+
+        self.next_btn = QPushButton("Next (Wiring Complete)")
+        self.next_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #007bff;
+                color: white;
+                font-size: 16px;
+                font-weight: bold;
+                padding: 12px 30px;
+                border-radius: 5px;
+            }
+            QPushButton:hover {
+                background-color: #0056b3;
+            }
+        """)
+        self.next_btn.clicked.connect(self.accept)
+        button_layout.addWidget(self.next_btn)
+
+        button_layout.addStretch()
+        layout.addLayout(button_layout)
+
+
+class ManualReadingDialog(QDialog):
+    """Dialog for manual pass/fail when DMM is not connected."""
+
+    def __init__(self, prompt: str, test_info: str, min_val: Optional[float],
+                 max_val: Optional[float], unit: str = "", comparison_type: str = "range",
+                 parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Verify DMM Reading")
+        self.setModal(True)
+        self.setMinimumWidth(450)
+
+        self._result: Optional[bool] = None
+
+        layout = QVBoxLayout(self)
+
+        # Test info
+        info_label = QLabel(test_info)
+        info_label.setStyleSheet("font-weight: bold; font-size: 14px;")
+        info_label.setWordWrap(True)
+        layout.addWidget(info_label)
+
+        layout.addSpacing(10)
+
+        # Show expected range
+        range_frame = QFrame()
+        range_frame.setFrameStyle(QFrame.Shape.Box | QFrame.Shadow.Sunken)
+        range_layout = QVBoxLayout(range_frame)
+
+        range_label = QLabel("Check the DMM display:")
+        range_label.setStyleSheet("font-size: 14px;")
+        range_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        range_layout.addWidget(range_label)
+
+        # Show limits based on comparison type
+        if comparison_type == 'gt':
+            limits_str = f"Reading must be > {min_val:.6g} {unit}".strip() if min_val is not None else prompt or "Check reading"
+        elif comparison_type == 'lt':
+            limits_str = f"Reading must be < {max_val:.6g} {unit}".strip() if max_val is not None else prompt or "Check reading"
+        elif min_val is not None and max_val is not None:
+            limits_str = f"Reading should be between {min_val:.6g} and {max_val:.6g} {unit}".strip()
+        elif min_val is not None:
+            limits_str = f"Reading should be >= {min_val:.6g} {unit}".strip()
+        elif max_val is not None:
+            limits_str = f"Reading should be <= {max_val:.6g} {unit}".strip()
+        else:
+            limits_str = prompt or "Does the reading match the expected value?"
+
+        limits_label = QLabel(limits_str)
+        limits_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #0066cc;")
+        limits_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        limits_label.setWordWrap(True)
+        range_layout.addWidget(limits_label)
+
+        layout.addWidget(range_frame)
+        layout.addSpacing(15)
+
+        # Question
+        question_label = QLabel("Does the DMM reading meet the requirement?")
+        question_label.setStyleSheet("font-size: 14px;")
+        question_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(question_label)
+
+        layout.addSpacing(15)
+
+        # Pass/Fail buttons
+        button_layout = QHBoxLayout()
+
+        self.fail_btn = QPushButton("NO - FAIL")
+        self.fail_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #dc3545;
+                color: white;
+                font-size: 18px;
+                font-weight: bold;
+                padding: 15px 40px;
+                border-radius: 5px;
+            }
+            QPushButton:hover {
+                background-color: #c82333;
+            }
+        """)
+        self.fail_btn.clicked.connect(self._on_fail)
+        button_layout.addWidget(self.fail_btn)
+
+        button_layout.addSpacing(20)
+
+        self.pass_btn = QPushButton("YES - PASS")
+        self.pass_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #28a745;
+                color: white;
+                font-size: 18px;
+                font-weight: bold;
+                padding: 15px 40px;
+                border-radius: 5px;
+            }
+            QPushButton:hover {
+                background-color: #218838;
+            }
+        """)
+        self.pass_btn.clicked.connect(self._on_pass)
+        button_layout.addWidget(self.pass_btn)
+
+        layout.addLayout(button_layout)
+
+    def _on_pass(self):
+        self._result = True
+        self.accept()
+
+    def _on_fail(self):
+        self._result = False
+        self.accept()
+
+    def get_result(self) -> Optional[bool]:
+        return self._result
+
+
 class ExecutionTab(QWidget):
     """Tab for executing calibration procedures."""
 
@@ -294,6 +637,104 @@ class ExecutionTab(QWidget):
             logger.info(f"Selected DMM: {data['make']} {data['model']} at {data['address']}")
         else:
             self._selected_dmm = None
+
+    def _get_workstation_dmm(self) -> Optional[Dict[str, Any]]:
+        """Get the first active DMM from workstation setup with a GPIB address.
+
+        Returns:
+            DMM info dict with make, model, address, or None if not available.
+        """
+        db = get_db()
+        if not db.is_connected:
+            return None
+
+        try:
+            from calsystem.config.settings import get_settings
+            settings = get_settings()
+            workstation_name = settings.workstation_name or "Default Workstation"
+
+            with db.session() as session:
+                config = session.query(WorkstationConfig).filter(
+                    WorkstationConfig.name == workstation_name
+                ).first()
+
+                if not config:
+                    return None
+
+                # Get active DMMs from workstation
+                ws_standards = session.query(WorkstationStandard).filter(
+                    WorkstationStandard.workstation_id == config.id,
+                    WorkstationStandard.is_active != False
+                ).all()
+
+                for ws_std in ws_standards:
+                    standard = session.query(Standard).filter(
+                        Standard.id == ws_std.standard_id
+                    ).first()
+
+                    if standard and standard.device_group == DeviceGroupType.DMM:
+                        address = ws_std.visa_address or standard.visa_address or ""
+                        if address:  # Only return if it has a GPIB/VISA address
+                            return {
+                                "standard_id": standard.id,
+                                "make": standard.make,
+                                "model": standard.model,
+                                "address": address,
+                            }
+
+        except Exception as e:
+            logger.error(f"Failed to get workstation DMM: {e}")
+
+        return None
+
+    def _check_dmm_responding(self, dmm_info: Dict[str, Any]) -> bool:
+        """Check if the DMM is responding to GPIB commands.
+
+        For HP/Agilent 3458A, sends RESET and END ALWAYS first since
+        the 3458A often won't respond to queries without initialization.
+
+        Args:
+            dmm_info: DMM info dict with address
+
+        Returns:
+            True if DMM responds, False otherwise.
+        """
+        address = dmm_info.get("address")
+        if not address:
+            return False
+
+        visa = get_visa_manager()
+        if not visa:
+            return False
+
+        model = dmm_info.get("model", "").lower()
+
+        try:
+            # For 3458A, send initialization commands first
+            if "3458" in model:
+                logger.info(f"Initializing 3458A at {address}...")
+                # RESET first
+                visa.write(address, "RESET")
+                # END ALWAYS - critical for GPIB communication
+                visa.write(address, "END ALWAYS")
+                # Small delay for reset to complete
+                import time
+                time.sleep(0.3)
+                # Now try ID? (3458A-specific) instead of *IDN?
+                success, response = visa.query(address, "ID?")
+                if success and response:
+                    logger.info(f"DMM responding: {response.strip()[:50]}")
+                    return True
+            else:
+                # Try to query identity - most instruments respond to *IDN?
+                success, response = visa.query(address, "*IDN?")
+                if success and response:
+                    logger.info(f"DMM responding: {response.strip()[:50]}")
+                    return True
+        except Exception as e:
+            logger.debug(f"DMM not responding: {e}")
+
+        return False
 
     def _on_init_dmm(self):
         """Initialize the selected DMM with RESET and END ALWAYS."""
@@ -453,6 +894,110 @@ class ExecutionTab(QWidget):
 
         return None
 
+    def _query_dmm_with_config(self, function: str, dmm_config: Dict[str, Any]) -> Optional[float]:
+        """
+        Query the DMM using configuration from test point including custom commands.
+
+        Args:
+            function: Measurement function (DCV, ACV, OHM, OHMF)
+            dmm_config: DMM configuration dict with custom_commands, range, etc.
+
+        Returns:
+            Reading as float (in base units), or None if failed.
+        """
+        if not self._selected_dmm:
+            return None
+
+        address = self._selected_dmm.get("address")
+        if not address:
+            return None
+
+        visa = get_visa_manager()
+        model = self._selected_dmm.get("model", "").lower()
+
+        # Get custom commands
+        custom_commands = dmm_config.get('custom_commands', [])
+        before_commands = [c for c in custom_commands if c.get('order', 'Before') == 'Before']
+        after_commands = [c for c in custom_commands if c.get('order') == 'After']
+
+        # Send "Before" custom commands
+        for cmd_info in before_commands:
+            cmd = cmd_info.get('command', '')
+            if cmd:
+                self.status_display.append(f"DMM: {cmd}")
+                if not visa.write(address, cmd):
+                    logger.warning(f"DMM command may have failed: {cmd}")
+
+        # HP/Agilent/Keysight 3458A commands
+        if "3458" in model:
+            # Set function - use range from config or AUTO
+            dmm_range = dmm_config.get('range', 'AUTO')
+            if dmm_range == 'AUTO':
+                func_cmd = f"{function} AUTO"
+            else:
+                func_cmd = f"{function} {dmm_range}"
+
+            self.status_display.append(f"DMM: {func_cmd}")
+            if not visa.write(address, func_cmd):
+                logger.error(f"Failed to set function: {func_cmd}")
+                return None
+
+            # Apply delay if configured
+            delay = dmm_config.get('delay', 0)
+            try:
+                delay = float(delay) if delay else 0
+            except (ValueError, TypeError):
+                delay = 0
+            if delay > 0:
+                import time
+                self.status_display.append(f"Waiting {delay}s for settling...")
+                time.sleep(delay)
+
+            # Trigger single reading
+            self.status_display.append("DMM: TRIG SGL")
+            success, response = visa.query(address, "TRIG SGL")
+
+            # Send "After" custom commands
+            for cmd_info in after_commands:
+                cmd = cmd_info.get('command', '')
+                if cmd:
+                    self.status_display.append(f"DMM: {cmd}")
+                    visa.write(address, cmd)
+
+            if success and response:
+                try:
+                    reading = float(response.strip())
+                    logger.info(f"DMM reading: {reading}")
+                    return reading
+                except ValueError:
+                    logger.error(f"Could not parse reading: {response}")
+                    return None
+        else:
+            # Generic SCPI DMM - send custom commands then standard query
+            func_map = {
+                "DCV": "MEAS:VOLT:DC?",
+                "ACV": "MEAS:VOLT:AC?",
+                "OHM": "MEAS:RES?",
+                "OHMF": "MEAS:FRES?",
+            }
+            cmd = func_map.get(function, "MEAS:VOLT:DC?")
+            success, response = visa.query(address, cmd)
+
+            # Send "After" custom commands
+            for cmd_info in after_commands:
+                cmd_str = cmd_info.get('command', '')
+                if cmd_str:
+                    visa.write(address, cmd_str)
+
+            if success and response:
+                try:
+                    return float(response.strip())
+                except ValueError:
+                    logger.error(f"Could not parse reading: {response}")
+                    return None
+
+        return None
+
     # -------------------------------------------------------------------------
     # Calibrator Detection and Selection
     # -------------------------------------------------------------------------
@@ -491,16 +1036,18 @@ class ExecutionTab(QWidget):
                         Standard.id == ws_std.standard_id
                     ).first()
 
-                    if standard and standard.device_group == DeviceGroupType.CALIBRATOR:
-                        has_cb = (standard.make.lower(), standard.model.lower()) in cb_set
-                        calibrators.append({
-                            "standard_id": standard.id,
-                            "address": ws_std.visa_address or standard.visa_address or "",
-                            "make": standard.make,
-                            "model": standard.model,
-                            "serial": standard.serial_number or "",
-                            "has_command_bank": has_cb,
-                        })
+                    if standard:
+                        if standard.device_group == DeviceGroupType.CALIBRATOR:
+                            has_cb = (standard.make.lower(), standard.model.lower()) in cb_set
+                            addr = ws_std.visa_address or standard.visa_address or ""
+                            calibrators.append({
+                                "standard_id": standard.id,
+                                "address": addr,
+                                "make": standard.make,
+                                "model": standard.model,
+                                "serial": standard.serial_number or "",
+                                "has_command_bank": has_cb,
+                            })
 
                 logger.info(f"Found {len(calibrators)} active calibrators in workstation")
                 return calibrators
@@ -519,6 +1066,9 @@ class ExecutionTab(QWidget):
             return []
 
         visa = get_visa_manager()
+        if not visa:
+            return []
+
         connected_calibrators = []
 
         # Only check the specific addresses we know about (much faster than scanning all)
@@ -530,15 +1080,18 @@ class ExecutionTab(QWidget):
             logger.info(f"Checking calibrator at {cal_address}...")
 
             # Try to identify this specific address
-            info = visa.identify(cal_address)
-            if info and info.is_connected:
-                cal["detected_address"] = info.address
-                cal["detected_make"] = info.manufacturer
-                cal["detected_model"] = info.model
-                connected_calibrators.append(cal)
-                logger.info(f"Found: {info.manufacturer} {info.model} at {cal_address}")
-            else:
-                logger.info(f"No response from {cal_address}")
+            try:
+                info = visa.identify(cal_address)
+                if info and info.is_connected:
+                    cal["detected_address"] = info.address
+                    cal["detected_make"] = info.manufacturer
+                    cal["detected_model"] = info.model
+                    connected_calibrators.append(cal)
+                    logger.info(f"Found: {info.manufacturer} {info.model} at {cal_address}")
+                else:
+                    logger.info(f"No response from {cal_address}")
+            except Exception as e:
+                logger.error(f"Exception identifying {cal_address}: {e}")
 
         return connected_calibrators
 
@@ -717,6 +1270,94 @@ class ExecutionTab(QWidget):
 
         self.status_display.append("Calibrator in standby mode")
 
+    def _reset_all_workstation_standards(self):
+        """Send Reset command to ALL workstation standards for safety when jumping test points."""
+        logger.info("SAFETY: Resetting all workstation standards before jump")
+        self.status_display.append("SAFETY: Resetting workstation standards...")
+
+        visa = get_visa_manager()
+        if not visa:
+            logger.warning("VISA manager not available for reset")
+            return
+
+        db = get_db()
+        if not db.is_connected:
+            logger.warning("Database not connected for reset")
+            return
+
+        try:
+            settings = get_settings()
+            workstation_name = settings.workstation_name or "Default Workstation"
+
+            with db.session() as session:
+                config = session.query(WorkstationConfig).filter(
+                    WorkstationConfig.name == workstation_name
+                ).first()
+
+                if not config:
+                    logger.warning(f"No workstation config found for '{workstation_name}'")
+                    return
+
+                # Get ALL active workstation standards
+                ws_standards = session.query(WorkstationStandard).filter(
+                    WorkstationStandard.workstation_id == config.id,
+                    WorkstationStandard.is_active != False
+                ).all()
+
+                logger.info(f"Found {len(ws_standards)} active workstation standards to reset")
+
+                reset_count = 0
+                for ws_std in ws_standards:
+                    standard = session.query(Standard).filter(
+                        Standard.id == ws_std.standard_id
+                    ).first()
+
+                    if not standard:
+                        continue
+
+                    # Get address
+                    address = ws_std.visa_address or standard.visa_address
+                    if not address:
+                        continue
+
+                    # Try to get Reset command from command bank
+                    command_bank = session.query(CommandBank).filter(
+                        CommandBank.make.ilike(standard.make),
+                        CommandBank.model.ilike(standard.model)
+                    ).first()
+
+                    reset_cmd = "*RST"  # Default
+                    if command_bank and command_bank.commands:
+                        import json
+                        try:
+                            commands = json.loads(command_bank.commands) if isinstance(command_bank.commands, str) else command_bank.commands
+                            for ref_name, cmd in commands.items():
+                                # Check for Reset Reference, Reset, or RST
+                                ref_upper = ref_name.upper()
+                                if 'RESET' in ref_upper or ref_upper == 'RST':
+                                    reset_cmd = cmd
+                                    logger.debug(f"Found reset command '{ref_name}' -> '{cmd}'")
+                                    break
+                        except Exception as e:
+                            logger.warning(f"Error parsing command bank: {e}")
+
+                    # Send reset command
+                    try:
+                        logger.info(f"Sending reset '{reset_cmd}' to {standard.make} {standard.model} at {address}")
+                        if visa.write(address, reset_cmd):
+                            reset_count += 1
+                            logger.info(f"Reset sent successfully to {standard.make} {standard.model}")
+                        else:
+                            logger.warning(f"Reset write returned False for {standard.make} {standard.model}")
+                    except Exception as e:
+                        logger.warning(f"Failed to reset {standard.make} {standard.model}: {e}")
+
+                if reset_count > 0:
+                    self.status_display.append(f"SAFETY: Reset sent to {reset_count} instrument(s)")
+
+        except Exception as e:
+            logger.error(f"Error resetting workstation standards: {e}")
+
     def _substitute_placeholders(self, command: str, tp: Dict[str, Any]) -> str:
         """
         Substitute placeholders in command with test point values.
@@ -889,27 +1530,48 @@ class ExecutionTab(QWidget):
         # Current test point display
         current_group = QGroupBox("Current Test Point")
         current_layout = QVBoxLayout(current_group)
+        current_layout.setContentsMargins(5, 10, 5, 5)
 
-        # Layout for nominal display + high voltage warning side by side
+        # Layout for the display + high voltage warning side by side
         nominal_hv_layout = QHBoxLayout()
 
-        # Big display for nominal value - scales with window size
+        # Combined display showing Section / Test Point and Nominal value
+        display_widget = QWidget()
+        display_layout = QVBoxLayout(display_widget)
+        display_layout.setContentsMargins(15, 10, 15, 10)
+        display_layout.setSpacing(5)
+        display_widget.setStyleSheet(
+            "QWidget { background-color: #2d2d2d; border-radius: 10px; }"
+        )
+
+        # Section / Test Point line (auto-sized)
+        self.section_testpoint_label = QLabel("-- / --")
+        self.section_testpoint_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.section_testpoint_label.setWordWrap(True)
+        self.section_testpoint_label.setStyleSheet(
+            "QLabel { color: #00ff00; font-size: 22px; font-weight: bold; background: transparent; }"
+        )
+        display_layout.addWidget(self.section_testpoint_label)
+
+        # Nominal value line
         self.nominal_display = QLabel("-- V")
         self.nominal_display.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.nominal_display.setWordWrap(True)
-        self.nominal_display.setMinimumHeight(80)
         self.nominal_display.setStyleSheet(
-            "QLabel { "
-            "  background-color: #2d2d2d; "
-            "  color: #00ff00; "
-            "  font-size: 28px; "
-            "  font-weight: bold; "
-            "  padding: 15px; "
-            "  border-radius: 10px; "
-            "  qproperty-alignment: AlignCenter; "
-            "}"
+            "QLabel { color: #ffff00; font-size: 32px; font-weight: bold; background: transparent; }"
         )
-        nominal_hv_layout.addWidget(self.nominal_display, stretch=1)
+        display_layout.addWidget(self.nominal_display)
+
+        # Tolerance line (smaller)
+        self.tolerance_display = QLabel("")
+        self.tolerance_display.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.tolerance_display.setStyleSheet(
+            "QLabel { color: #aaaaaa; font-size: 14px; background: transparent; }"
+        )
+        display_layout.addWidget(self.tolerance_display)
+
+        display_widget.setMinimumHeight(120)
+        nominal_hv_layout.addWidget(display_widget, stretch=1)
 
         # High Voltage Warning - hidden by default
         self.hv_warning_label = QLabel()
@@ -967,18 +1629,13 @@ class ExecutionTab(QWidget):
 
         current_layout.addLayout(nominal_hv_layout)
 
-        # Test info
-        info_layout = QFormLayout()
+        # Hidden labels for backwards compatibility (used by other methods)
         self.section_label = QLabel("--")
-        info_layout.addRow("Section:", self.section_label)
-
+        self.section_label.setVisible(False)
         self.testpoint_label = QLabel("--")
-        info_layout.addRow("Test Point:", self.testpoint_label)
-
+        self.testpoint_label.setVisible(False)
         self.tolerance_label = QLabel("--")
-        info_layout.addRow("Tolerance:", self.tolerance_label)
-
-        current_layout.addLayout(info_layout)
+        self.tolerance_label.setVisible(False)
 
         left_layout.addWidget(current_group)
 
@@ -1493,6 +2150,13 @@ class ExecutionTab(QWidget):
                             "expected_value": tp.expected_value,
                             "expected_unit": tp.expected_unit,
                             "wiring_diagram_type": tp.wiring_diagram_type,
+                            # Pass/Fail range check fields
+                            "pass_fail_min": tp.pass_fail_min,
+                            "pass_fail_max": tp.pass_fail_max,
+                            "pass_fail_range_unit": tp.pass_fail_range_unit,
+                            "pass_fail_comparison_type": tp.pass_fail_comparison_type,
+                            # DMM configuration
+                            "dmm_config": tp.dmm_config,
                         })
 
             # Populate table with results
@@ -1667,6 +2331,13 @@ class ExecutionTab(QWidget):
                             "expected_unit": tp.expected_unit,
                             # Test point specific wiring diagram
                             "wiring_diagram_type": tp.wiring_diagram_type,
+                            # Pass/Fail range check fields
+                            "pass_fail_min": tp.pass_fail_min,
+                            "pass_fail_max": tp.pass_fail_max,
+                            "pass_fail_range_unit": tp.pass_fail_range_unit,
+                            "pass_fail_comparison_type": tp.pass_fail_comparison_type,
+                            # DMM configuration
+                            "dmm_config": tp.dmm_config,
                         })
 
         except Exception as e:
@@ -1805,6 +2476,13 @@ class ExecutionTab(QWidget):
                         "expected_unit": tp.expected_unit,
                         # Test point specific wiring diagram
                         "wiring_diagram_type": tp.wiring_diagram_type,
+                        # Pass/Fail range check fields
+                        "pass_fail_min": tp.pass_fail_min,
+                        "pass_fail_max": tp.pass_fail_max,
+                        "pass_fail_range_unit": tp.pass_fail_range_unit,
+                        "pass_fail_comparison_type": tp.pass_fail_comparison_type,
+                        # DMM configuration
+                        "dmm_config": tp.dmm_config,
                     })
 
             if not self._test_points:
@@ -1912,6 +2590,9 @@ class ExecutionTab(QWidget):
 
             self.section_label.setText(tp['section_name'])
             self.testpoint_label.setText(tp['description'])
+            # Update combined display
+            self.section_testpoint_label.setText(f"{tp['section_name']}  /  {tp['description']}")
+            self._auto_size_section_label()
 
             # Format nominal display - show what we're expecting based on measurement_target
             measurement_target = tp.get('measurement_target', 'PRIMARY')
@@ -1965,7 +2646,11 @@ class ExecutionTab(QWidget):
             unit = tp.get('unit', '')
 
             if not spec.is_empty():
-                self.tolerance_label.setText(f"{spec_str} (±{calculated:g} {unit})")
+                tol_text = f"±{calculated:g} {unit}  ({spec_str})"
+                self.tolerance_label.setText(tol_text)
+                self.tolerance_display.setText(tol_text)
+            else:
+                self.tolerance_display.setText("")
 
             # Load wiring diagram for this section
             self._load_wiring_diagram(
@@ -2026,8 +2711,11 @@ class ExecutionTab(QWidget):
 
             self.section_label.setText(section)
             self.testpoint_label.setText(f"Point {row + 1}")
+            self.section_testpoint_label.setText(f"{section}  /  Point {row + 1}")
+            self._auto_size_section_label()
             self.nominal_display.setText(nominal)
             self.tolerance_label.setText("No tolerance specified")
+            self.tolerance_display.setText("")
 
             self.status_display.append(f"Manual mode: {nominal}")
             self.wiring_label.setText("No wiring diagram available")
@@ -2835,8 +3523,13 @@ class ExecutionTab(QWidget):
             self.status_display.append("WARNING: Main output command failed")
 
     def _execute_pass_fail_test(self, tp: Dict[str, Any]):
-        """Execute a Pass/Fail test by showing dialog to technician."""
-        prompt = tp.get('pass_fail_prompt') or "Does this test point pass?"
+        """Execute a Pass/Fail test with two-step flow:
+
+        Step 1: Show wiring prompt/diagram - tech wires DUT to DMM
+        Step 2a (DMM connected): Auto-query DMM, compare to limits, auto-advance if pass
+        Step 2b (No DMM): Show manual dialog asking if reading is in range
+        """
+        prompt = tp.get('pass_fail_prompt') or "Wire the DUT to the DMM as shown."
 
         # Build test info string
         nominal_str = f"{tp.get('nominal_value', '')} {tp.get('unit', '')}"
@@ -2844,38 +3537,211 @@ class ExecutionTab(QWidget):
             nominal_str += f" @ {tp['frequency']} {tp.get('frequency_unit', 'Hz')}"
         test_info = f"{tp.get('section_name', '')} - {tp.get('description', nominal_str)}"
 
-        self.status_display.append(f"Pass/Fail Test: {prompt}")
+        # Get limits and comparison type
+        min_val = tp.get('pass_fail_min')
+        max_val = tp.get('pass_fail_max')
+        comparison_type = tp.get('pass_fail_comparison_type', 'range')  # Default to range for backwards compat
+        unit = tp.get('unit', '')
+        # For display, prefer pass_fail_range_unit if set (the actual measurement unit)
+        display_unit = tp.get('pass_fail_range_unit') or unit
+        measured_value = None
+        row = self._current_test_index
 
-        # Show the Pass/Fail dialog
-        dialog = PassFailDialog(prompt, test_info, self)
-        dialog.exec()
+        # Check if this is a pass/fail with limits (requires DMM reading)
+        has_limits = min_val is not None or max_val is not None
 
-        result = dialog.get_result()
+        if not has_limits:
+            # No limits - simple manual Pass/Fail (no DMM needed)
+            self.status_display.append(f"Pass/Fail Test (Manual): {prompt}")
+            dialog = PassFailDialog(prompt, test_info, self)
+            dialog.exec()
+            result = dialog.get_result()
 
-        if result is None:
-            # Dialog was cancelled
+            if result is None:
+                self.status_display.append("Test cancelled")
+                return
+
+            self._finalize_pass_fail_result(tp, row, result, None)
+            return
+
+        # Has limits - need DMM reading
+        self.status_display.append(f"Pass/Fail Test: {test_info}")
+
+        # STEP 1: Show wiring prompt
+        # Try to get wiring image for this test point
+        wiring_image = self._get_pass_fail_wiring_image(tp)
+
+        wiring_prompt = prompt
+        if min_val is not None and max_val is not None:
+            wiring_prompt += f"\n\nExpected reading: {min_val:.6g} to {max_val:.6g} {unit}"
+        elif min_val is not None:
+            wiring_prompt += f"\n\nExpected reading: >= {min_val:.6g} {unit}"
+        elif max_val is not None:
+            wiring_prompt += f"\n\nExpected reading: <= {max_val:.6g} {unit}"
+
+        wiring_dialog = WiringPromptDialog(wiring_prompt, test_info, wiring_image, self)
+        if wiring_dialog.exec() != QDialog.DialogCode.Accepted:
             self.status_display.append("Test cancelled")
             return
 
-        row = self._current_test_index
+        self.status_display.append("Wiring confirmed by technician")
 
-        if result:
-            # PASS
+        # STEP 2: Check for DMM and take reading
+        # First try the selected DMM, then try workstation DMM
+        dmm_info = self._selected_dmm
+        if not dmm_info or not dmm_info.get("address"):
+            dmm_info = self._get_workstation_dmm()
+
+        dmm_connected = False
+
+        if dmm_info and dmm_info.get("address"):
+            # Check if DMM is actually responding
+            self.status_display.append(f"Checking DMM: {dmm_info.get('make', '')} {dmm_info.get('model', '')}...")
+            dmm_connected = self._check_dmm_responding(dmm_info)
+
+        if dmm_connected:
+            # AUTOMATED MODE: Read from DMM
+            self.status_display.append("DMM connected - taking automated reading...")
+
+            # Get DMM config from test point if available
+            dmm_config = tp.get('dmm_config')
+            if isinstance(dmm_config, str):
+                import json
+                try:
+                    dmm_config = json.loads(dmm_config)
+                except:
+                    dmm_config = None
+
+            # Determine DMM function - prefer dmm_config, then pass_fail_range_unit, then unit
+            dmm_func = "DCV"  # Default
+            if dmm_config and dmm_config.get('func'):
+                dmm_func = dmm_config['func']
+                self.status_display.append(f"Using configured function: {dmm_func}")
+            else:
+                # Determine from pass_fail_range_unit first, then unit
+                range_unit = tp.get('pass_fail_range_unit', '') or unit or ''
+                range_unit_lower = range_unit.lower()
+                if 'ohm' in range_unit_lower or range_unit_lower in ['ω', 'kohm', 'mohm']:
+                    dmm_func = "OHM"
+                elif range_unit_lower in ['vac', 'v ac']:
+                    dmm_func = "ACV"
+
+            # Store DMM info temporarily for query
+            original_dmm = self._selected_dmm
+            self._selected_dmm = dmm_info
+
+            # Use config-aware query if we have dmm_config
+            if dmm_config:
+                measured_value = self._query_dmm_with_config(dmm_func, dmm_config)
+            else:
+                measured_value = self._query_dmm(dmm_func)
+
+            self._selected_dmm = original_dmm  # Restore
+
+            if measured_value is not None:
+                # Apply reading format multiplier if configured
+                raw_value = measured_value
+                if dmm_config:
+                    reading_format = dmm_config.get('reading_format', 'x1')
+                    multiplier = 1.0
+                    if reading_format.startswith('x'):
+                        try:
+                            mult_str = reading_format.split()[0][1:]  # Remove 'x' prefix
+                            multiplier = float(mult_str)
+                        except:
+                            multiplier = 1.0
+                    elif reading_format.startswith('/'):
+                        try:
+                            div_str = reading_format.split()[0][1:]  # Remove '/' prefix
+                            multiplier = 1.0 / float(div_str)
+                        except:
+                            multiplier = 1.0
+
+                    if multiplier != 1.0:
+                        measured_value = raw_value * multiplier
+                        self.status_display.append(f"DMM Raw: {raw_value:.6g}, Multiplier: {reading_format.split()[0]}")
+
+                self.status_display.append(f"DMM Reading: {measured_value:.6g} {display_unit}")
+
+                # Check if reading passes based on comparison type
+                in_range = True
+                if comparison_type == 'gt':
+                    # Greater Than: measured must be > threshold (stored in min_val)
+                    if min_val is not None and measured_value <= min_val:
+                        in_range = False
+                    self.status_display.append(f"Check: {measured_value:.6g} > {min_val} ? {'Yes' if in_range else 'No'}")
+                elif comparison_type == 'lt':
+                    # Less Than: measured must be < threshold (stored in max_val)
+                    if max_val is not None and measured_value >= max_val:
+                        in_range = False
+                    self.status_display.append(f"Check: {measured_value:.6g} < {max_val} ? {'Yes' if in_range else 'No'}")
+                else:
+                    # Range: measured must be between min and max (inclusive)
+                    if min_val is not None and measured_value < min_val:
+                        in_range = False
+                    if max_val is not None and measured_value > max_val:
+                        in_range = False
+
+                if in_range:
+                    # AUTO-PASS: Reading is within limits
+                    self.status_display.append("Reading within limits - AUTO PASS")
+                    self._finalize_pass_fail_result(tp, row, True, measured_value)
+                    return
+                else:
+                    # AUTO-FAIL: Reading out of limits - but show dialog to confirm/override
+                    self.status_display.append("Reading OUT OF LIMITS - confirm result")
+                    dialog = PassFailWithReadingDialog(
+                        "Reading is outside limits. Confirm result:",
+                        test_info, measured_value, min_val, max_val, display_unit,
+                        comparison_type, self
+                    )
+                    dialog.exec()
+                    result = dialog.get_result()
+                    if result is None:
+                        self.status_display.append("Test cancelled")
+                        return
+                    self._finalize_pass_fail_result(tp, row, result, measured_value)
+                    return
+            else:
+                self.status_display.append("DMM read failed - switching to manual mode")
+
+        # MANUAL MODE: No DMM or read failed
+        self.status_display.append("Manual verification required - check DMM display")
+        dialog = ManualReadingDialog(prompt, test_info, min_val, max_val, display_unit, comparison_type, self)
+        dialog.exec()
+        result = dialog.get_result()
+
+        if result is None:
+            self.status_display.append("Test cancelled")
+            return
+
+        self._finalize_pass_fail_result(tp, row, result, None)
+
+    def _finalize_pass_fail_result(self, tp: Dict[str, Any], row: int, passed: bool, measured_value: Optional[float]):
+        """Finalize and record a pass/fail result, update UI, and advance."""
+        if passed:
             self.status_display.append("Result: PASS")
-            self.reading_input.setText("PASS")
-            self._record_pass_fail_result(tp, True)
+            if measured_value is not None:
+                self.reading_input.setText(f"{measured_value:.6g}")
+            else:
+                self.reading_input.setText("PASS")
+            self._record_pass_fail_result(tp, True, measured_value)
             # Update table
-            self.testpoints_table.setItem(row, 3, QTableWidgetItem("PASS"))
+            reading_display = f"{measured_value:.6g}" if measured_value is not None else "PASS"
+            self.testpoints_table.setItem(row, 3, QTableWidgetItem(reading_display))
             status_item = QTableWidgetItem("Pass")
             status_item.setBackground(QColor(200, 255, 200))
             self.testpoints_table.setItem(row, 4, status_item)
         else:
-            # FAIL
             self.status_display.append("Result: FAIL")
-            self.reading_input.setText("FAIL")
-            self._record_pass_fail_result(tp, False)
+            if measured_value is not None:
+                self.reading_input.setText(f"{measured_value:.6g}")
+            else:
+                self.reading_input.setText("FAIL")
+            self._record_pass_fail_result(tp, False, measured_value)
             # Update table
-            self.testpoints_table.setItem(row, 3, QTableWidgetItem("FAIL"))
+            reading_display = f"{measured_value:.6g}" if measured_value is not None else "FAIL"
+            self.testpoints_table.setItem(row, 3, QTableWidgetItem(reading_display))
             status_item = QTableWidgetItem("Fail")
             status_item.setBackground(QColor(255, 200, 200))
             self.testpoints_table.setItem(row, 4, status_item)
@@ -2887,9 +3753,43 @@ class ExecutionTab(QWidget):
         # Advance to next test point
         self._advance_to_next(row)
 
-    def _record_pass_fail_result(self, tp: Dict[str, Any], passed: bool):
-        """Record a Pass/Fail test result to the database."""
+    def _get_pass_fail_wiring_image(self, tp: Dict[str, Any]) -> Optional[QPixmap]:
+        """Get wiring diagram image for a pass/fail test point if available."""
+        # Check if test point has a wiring diagram type specified
+        wiring_type = tp.get('wiring_diagram_type')
+        if not wiring_type:
+            return None
+
+        # Try to get from CSP if loaded
+        if self._current_csp_data and self._current_csp_data.images:
+            # Look for matching image in CSP
+            for img_path, img_data in self._current_csp_data.images.items():
+                if wiring_type.lower() in img_path.lower():
+                    pixmap = QPixmap()
+                    pixmap.loadFromData(img_data)
+                    if not pixmap.isNull():
+                        return pixmap
+
+        return None
+
+    def _record_pass_fail_result(self, tp: Dict[str, Any], passed: bool, measured_value: Optional[float] = None):
+        """Record a Pass/Fail test result to the database.
+
+        Args:
+            tp: Test point data dictionary
+            passed: Whether the test passed
+            measured_value: Actual measured value from DMM (if available)
+        """
         if not self._current_session_id:
+            return
+
+        # CSP-loaded test points don't have database IDs - skip DB recording for those
+        test_point_id = tp.get('id')
+        if test_point_id is None:
+            if measured_value is not None:
+                logger.info(f"Pass/Fail result (CSP session, not saved to DB): {'PASS' if passed else 'FAIL'} ({measured_value:.6g})")
+            else:
+                logger.info(f"Pass/Fail result (CSP session, not saved to DB): {'PASS' if passed else 'FAIL'}")
             return
 
         db = get_db()
@@ -2897,17 +3797,24 @@ class ExecutionTab(QWidget):
             return
 
         try:
+            # If we have a measured value from DMM, use it; otherwise use 1/0 for pass/fail
+            value_to_record = measured_value if measured_value is not None else (1.0 if passed else 0.0)
+            input_method = InputMethod.REMOTE if measured_value is not None else InputMethod.KEYBOARD
+
             with db.session() as session:
                 result = TestResult(
                     session_id=self._current_session_id,
-                    test_point_id=tp['id'],
-                    measured_value=1.0 if passed else 0.0,  # Use 1/0 for pass/fail
+                    test_point_id=test_point_id,
+                    measured_value=value_to_record,
                     status=TestStatus.PASS if passed else TestStatus.FAIL,
-                    input_method=InputMethod.KEYBOARD,
+                    input_method=input_method,
                 )
                 session.add(result)
 
-            logger.info(f"Recorded Pass/Fail result: {'PASS' if passed else 'FAIL'} for test point {tp['id']}")
+            if measured_value is not None:
+                logger.info(f"Recorded Pass/Fail result: {'PASS' if passed else 'FAIL'} ({measured_value:.6g}) for test point {test_point_id}")
+            else:
+                logger.info(f"Recorded Pass/Fail result: {'PASS' if passed else 'FAIL'} for test point {test_point_id}")
 
         except Exception as e:
             logger.error(f"Failed to record Pass/Fail result: {e}")
@@ -3570,10 +4477,13 @@ class ExecutionTab(QWidget):
             # Update display info without executing
             self.section_label.setText(section_name)
             self.testpoint_label.setText(tp.get('description', ''))
+            self.section_testpoint_label.setText(f"{section_name}  /  {tp.get('description', '')}")
+            self._auto_size_section_label()
             nominal_str = f"{tp.get('nominal_value', 0)} {tp.get('unit', '')}"
             if tp.get('frequency'):
                 nominal_str += f" @ {tp['frequency']} {tp.get('frequency_unit', 'Hz')}"
             self.nominal_display.setText(nominal_str)
+            self.tolerance_display.setText("")
 
             # Load and show wiring diagram
             self._load_wiring_diagram(section_id, section_name, standard_section_type)
@@ -3582,6 +4492,11 @@ class ExecutionTab(QWidget):
             self._current_test_index = row
             self.testpoints_table.selectRow(row)
             return
+
+        # SAFETY FIRST: Reset all workstation standards IMMEDIATELY when jumping
+        # This prevents shock hazard if calibrator is sourcing high voltage
+        # Do this BEFORE any dialogs so the tech is safe while reading/confirming
+        self._reset_all_workstation_standards()
 
         # SAFETY CHECK 2: Different section - show wiring confirmation first
         if section_id != self._current_section_id:
@@ -3630,6 +4545,34 @@ class ExecutionTab(QWidget):
 
         # Execute the test point (this will show Pass/Fail dialog for pass_fail tests)
         self._update_current_display(row)
+
+    # -------------------------------------------------------------------------
+    # Auto-size Section/Test Point Label
+    # -------------------------------------------------------------------------
+
+    def _auto_size_section_label(self):
+        """Auto-size the section/testpoint label font based on text length."""
+        text = self.section_testpoint_label.text()
+        text_len = len(text)
+
+        # Scale font size based on text length
+        # Short text (< 25 chars) = 28px (bigger font)
+        # Medium text (25-40 chars) = 22px (default)
+        # Long text (40-60 chars) = 18px
+        # Very long text (> 60 chars) = 14px (minimum)
+
+        if text_len < 25:
+            font_size = 28
+        elif text_len < 40:
+            font_size = 22
+        elif text_len < 60:
+            font_size = 18
+        else:
+            font_size = 14
+
+        self.section_testpoint_label.setStyleSheet(
+            f"QLabel {{ color: #00ff00; font-size: {font_size}px; font-weight: bold; background: transparent; }}"
+        )
 
     # -------------------------------------------------------------------------
     # High Voltage Warning

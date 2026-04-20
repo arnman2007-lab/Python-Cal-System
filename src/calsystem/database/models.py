@@ -447,6 +447,7 @@ class TestPoint(Base):
     pass_fail_min = Column(Float, nullable=True, comment="Minimum value for Pass/Fail range check")
     pass_fail_max = Column(Float, nullable=True, comment="Maximum value for Pass/Fail range check")
     pass_fail_range_unit = Column(String(20), nullable=True, comment="Unit for Pass/Fail range check")
+    pass_fail_comparison_type = Column(String(10), nullable=True, comment="Comparison type: 'range', 'gt' (greater than), 'lt' (less than)")
 
     # Measurement target - what are we actually measuring?
     # PRIMARY = compare reading to nominal_value
