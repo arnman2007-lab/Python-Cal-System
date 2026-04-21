@@ -83,10 +83,18 @@ class TestPointData:
     excel_cell: Optional[str] = None
 
     # DUT Remote Communication
+    # Setup command - sent to DUT to configure it (e.g., change range, set mode)
+    dut_setup_command: Optional[str] = None
+    dut_setup_param: Optional[str] = None  # Parameter value to substitute into command {value}
+    # Pre-check - query DUT to verify state
     dut_pre_check_command: Optional[str] = None
+    dut_pre_check_param: Optional[str] = None  # Parameter value to substitute into command {value}
     dut_pre_check_expected: Optional[str] = None
+    # Post-read - read measurement from DUT
     dut_post_read_command: Optional[str] = None
+    dut_post_read_param: Optional[str] = None  # Parameter value to substitute into command {value}
     dut_post_read_parser: Optional[str] = None
+    dut_post_read_index: Optional[int] = None  # For CSV responses, which field contains the value (0-based)
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -133,10 +141,15 @@ class TestPointData:
             "excel_workbook": self.excel_workbook,
             "excel_sheet": self.excel_sheet,
             "excel_cell": self.excel_cell,
+            "dut_setup_command": self.dut_setup_command,
+            "dut_setup_param": self.dut_setup_param,
             "dut_pre_check_command": self.dut_pre_check_command,
+            "dut_pre_check_param": self.dut_pre_check_param,
             "dut_pre_check_expected": self.dut_pre_check_expected,
             "dut_post_read_command": self.dut_post_read_command,
+            "dut_post_read_param": self.dut_post_read_param,
             "dut_post_read_parser": self.dut_post_read_parser,
+            "dut_post_read_index": self.dut_post_read_index,
         }
 
     @classmethod
@@ -185,10 +198,15 @@ class TestPointData:
             excel_workbook=data.get("excel_workbook"),
             excel_sheet=data.get("excel_sheet"),
             excel_cell=data.get("excel_cell"),
+            dut_setup_command=data.get("dut_setup_command"),
+            dut_setup_param=data.get("dut_setup_param"),
             dut_pre_check_command=data.get("dut_pre_check_command"),
+            dut_pre_check_param=data.get("dut_pre_check_param"),
             dut_pre_check_expected=data.get("dut_pre_check_expected"),
             dut_post_read_command=data.get("dut_post_read_command"),
+            dut_post_read_param=data.get("dut_post_read_param"),
             dut_post_read_parser=data.get("dut_post_read_parser"),
+            dut_post_read_index=data.get("dut_post_read_index"),
         )
 
 

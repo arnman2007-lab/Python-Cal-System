@@ -337,14 +337,21 @@ class DatabaseManager:
                         logger.info("Added com_port column to duts")
 
                     # DUT remote fields for test_points
+                    result = conn.execute(text("PRAGMA table_info(test_points)"))
+                    tp_columns = [row[1] for row in result.fetchall()]
                     dut_remote_columns = [
+                        ('dut_setup_command', 'VARCHAR(50)'),
+                        ('dut_setup_param', 'VARCHAR(100)'),
                         ('dut_pre_check_command', 'VARCHAR(50)'),
+                        ('dut_pre_check_param', 'VARCHAR(100)'),
                         ('dut_pre_check_expected', 'VARCHAR(100)'),
                         ('dut_post_read_command', 'VARCHAR(50)'),
+                        ('dut_post_read_param', 'VARCHAR(100)'),
                         ('dut_post_read_parser', 'VARCHAR(50)'),
+                        ('dut_post_read_index', 'INTEGER'),
                     ]
                     for col_name, col_type in dut_remote_columns:
-                        if col_name not in columns:
+                        if col_name not in tp_columns:
                             conn.execute(text(f"ALTER TABLE test_points ADD COLUMN {col_name} {col_type}"))
                             conn.commit()
                             logger.info(f"Added {col_name} column to test_points")
@@ -588,10 +595,15 @@ class DatabaseManager:
 
                     # DUT remote fields for test_points
                     dut_remote_columns = [
+                        ('dut_setup_command', 'VARCHAR(50)'),
+                        ('dut_setup_param', 'VARCHAR(100)'),
                         ('dut_pre_check_command', 'VARCHAR(50)'),
+                        ('dut_pre_check_param', 'VARCHAR(100)'),
                         ('dut_pre_check_expected', 'VARCHAR(100)'),
                         ('dut_post_read_command', 'VARCHAR(50)'),
+                        ('dut_post_read_param', 'VARCHAR(100)'),
                         ('dut_post_read_parser', 'VARCHAR(50)'),
+                        ('dut_post_read_index', 'INTEGER'),
                     ]
                     for col_name, col_type in dut_remote_columns:
                         result = conn.execute(text(

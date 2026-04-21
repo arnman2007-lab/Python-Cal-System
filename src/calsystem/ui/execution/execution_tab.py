@@ -1432,8 +1432,13 @@ class ExecutionTab(QWidget):
 
         return None
 
-    def _query_dut(self, command_name: str) -> Optional[str]:
-        """Send a query command to the DUT and return the response."""
+    def _query_dut(self, command_name: str, param: Optional[str] = None) -> Optional[str]:
+        """Send a query command to the DUT and return the response.
+
+        Args:
+            command_name: Name of the command from the DUT command bank.
+            param: Optional parameter value to substitute for {value} placeholder.
+        """
         cmd_info = self._get_dut_command(command_name)
         if not cmd_info:
             logger.warning(f"DUT command not found: {command_name}")
@@ -1448,6 +1453,11 @@ class ExecutionTab(QWidget):
 
         serial_mgr = get_serial_manager()
         command = cmd_info.get("command", "")
+
+        # Substitute parameter value if provided
+        if param and "{value}" in command:
+            command = command.replace("{value}", param)
+
         delay_before = cmd_info.get("delay_before", 0)
         delay_after = cmd_info.get("delay_after", 0.1)
 
@@ -1467,8 +1477,13 @@ class ExecutionTab(QWidget):
             self.status_display.append("DUT Query failed - no response")
             return None
 
-    def _send_dut_command(self, command_name: str) -> bool:
-        """Send a command to the DUT (no response expected)."""
+    def _send_dut_command(self, command_name: str, param: Optional[str] = None) -> bool:
+        """Send a command to the DUT (no response expected).
+
+        Args:
+            command_name: Name of the command from the DUT command bank.
+            param: Optional parameter value to substitute for {value} placeholder.
+        """
         cmd_info = self._get_dut_command(command_name)
         if not cmd_info:
             logger.warning(f"DUT command not found: {command_name}")
@@ -1482,11 +1497,51 @@ class ExecutionTab(QWidget):
 
         serial_mgr = get_serial_manager()
         command = cmd_info.get("command", "")
+
+        # Substitute parameter value if provided
+        if param and "{value}" in command:
+            command = command.replace("{value}", param)
+
         delay_after = cmd_info.get("delay_after", 0.1)
 
         self.status_display.append(f"DUT Command: {command}")
 
         return serial_mgr.write(self._dut_com_port, command, delay_after=delay_after)
+
+    def _execute_dut_setup(self, tp: Dict[str, Any]) -> bool:
+        """
+        Execute DUT setup command to configure the DUT before the test.
+
+        Returns True if successful or not configured, False if failed.
+        """
+        setup_cmd = tp.get('dut_setup_command')
+        setup_param = tp.get('dut_setup_param')  # Parameter for {value} substitution
+
+        if not setup_cmd:
+            return True  # No setup command configured
+
+        if not self._dut_commands or not self._dut_com_port:
+            # No DUT remote configured, skip setup
+            return True
+
+        self.status_display.append(f"Configuring DUT: {setup_cmd}" + (f" ({setup_param})" if setup_param else ""))
+
+        # Send the setup command to the DUT
+        success = self._send_dut_command(setup_cmd, param=setup_param)
+
+        if success:
+            self.status_display.append("DUT setup command sent successfully")
+            return True
+        else:
+            # Setup failed - ask if user wants to continue
+            reply = QMessageBox.question(
+                self,
+                "DUT Setup Failed",
+                f"Failed to send setup command to DUT ({setup_cmd}).\n\n"
+                "Continue anyway?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            return reply == QMessageBox.StandardButton.Yes
 
     def _execute_dut_precheck(self, tp: Dict[str, Any]) -> bool:
         """
@@ -1495,6 +1550,7 @@ class ExecutionTab(QWidget):
         Returns True if OK to proceed, False if cancelled.
         """
         precheck_cmd = tp.get('dut_pre_check_command')
+        precheck_param = tp.get('dut_pre_check_param')  # Parameter for {value} substitution
         expected = tp.get('dut_pre_check_expected')
 
         if not precheck_cmd or not expected:
@@ -1510,8 +1566,8 @@ class ExecutionTab(QWidget):
         test_info = f"Test Point: {nominal} {unit}"
 
         while True:
-            # Query DUT
-            response = self._query_dut(precheck_cmd)
+            # Query DUT (pass parameter for {value} substitution)
+            response = self._query_dut(precheck_cmd, param=precheck_param)
 
             if response is None:
                 # Query failed - ask if user wants to continue
@@ -1569,25 +1625,40 @@ class ExecutionTab(QWidget):
         Returns the reading if successful, None otherwise.
         """
         postread_cmd = tp.get('dut_post_read_command')
+        postread_param = tp.get('dut_post_read_param')  # Parameter for {value} substitution
         if not postread_cmd:
             return None  # No post-read configured
 
         if not self._dut_commands or not self._dut_com_port:
             return None
 
-        # Query DUT for reading
-        response = self._query_dut(postread_cmd)
+        # Query DUT for reading (pass parameter for {value} substitution)
+        response = self._query_dut(postread_cmd, param=postread_param)
         if response is None:
             return None
 
         # Parse response based on parser type
         parser = tp.get('dut_post_read_parser', 'numeric')
+        csv_index = tp.get('dut_post_read_index', 1)  # Default to position 1
 
         try:
-            if parser == 'numeric':
+            if parser == 'csv_field':
+                # Extract value from comma-separated response
+                # Example: "QM,+0.000E+00,VDC,AUTO" with index=1 → "+0.000E+00"
+                fields = [f.strip() for f in response.split(',')]
+                if csv_index < len(fields):
+                    value_str = fields[csv_index]
+                    self.status_display.append(f"CSV field {csv_index}: {value_str}")
+                    # Try to convert to float
+                    return float(value_str)
+                else:
+                    logger.warning(f"CSV index {csv_index} out of range (only {len(fields)} fields)")
+                    self.status_display.append(f"CSV index {csv_index} out of range")
+                    return None
+            elif parser == 'numeric':
                 # Extract first number from response
                 import re
-                match = re.search(r'-?\d+\.?\d*', response)
+                match = re.search(r'-?\d+\.?\d*[eE]?[+-]?\d*', response)
                 if match:
                     return float(match.group())
             elif parser == 'string':
@@ -3340,6 +3411,12 @@ class ExecutionTab(QWidget):
     def _set_calibrator_output(self, tp: Dict[str, Any]):
         """Send output command to calibrator for the test point."""
         test_type = tp.get('test_type', 'measurement')
+
+        # DUT Setup Command: Send command to configure DUT before test
+        if tp.get('dut_setup_command'):
+            if not self._execute_dut_setup(tp):
+                # User cancelled or setup failed
+                return
 
         # DUT Pre-Check: Verify DUT is in expected state before calibrator output
         if tp.get('dut_pre_check_command') and tp.get('dut_pre_check_expected'):

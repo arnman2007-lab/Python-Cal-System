@@ -47,7 +47,7 @@ from calsystem.database.models import (
     Procedure, TestSection, TestPoint, CommandBank, ToleranceType, WiringDiagram,
     Standard, WorkstationStandard, WorkstationConfig, DeviceGroupType,
     WiringDiagramLibrary, SectionDiagramLink, STANDARD_SECTION_TYPES, get_all_section_types,
-    DeviceModel,
+    DeviceModel, STANDARD_DUT_COMMANDS,
 )
 from calsystem.config.settings import get_settings
 from calsystem.procedures import export_procedure_to_csp
@@ -64,6 +64,7 @@ class FlowStepWidget(QWidget):
         "section": "📋",
         "section_cmd": "🔧",
         "precondition": "⚡",
+        "dut_setup": "🔄",
         "dut_precheck": "📡",
         "source": "📤",
         "operate": "▶️",
@@ -211,13 +212,28 @@ class FlowPreviewWidget(QWidget):
             self._add_step("precondition", "Pre-Conditioning", detail)
             steps_added += 1
 
-        # 5. DUT Pre-Check
+        # 5. DUT Setup Command (send command to configure DUT)
+        dut_setup = test_point_data.get("dut_setup_command")
+        if dut_setup:
+            if steps_added > 0:
+                self._add_arrow()
+            param = test_point_data.get("dut_setup_param", "")
+            detail = f"Send: {dut_setup}"
+            if param:
+                detail += f" ({param})"
+            self._add_step("dut_setup", "Configure DUT", detail)
+            steps_added += 1
+
+        # 6. DUT Pre-Check (query DUT to verify state)
         dut_precheck = test_point_data.get("dut_pre_check_command")
         if dut_precheck:
             if steps_added > 0:
                 self._add_arrow()
             expected = test_point_data.get("dut_pre_check_expected", "")
+            param = test_point_data.get("dut_pre_check_param", "")
             detail = f"Command: {dut_precheck}"
+            if param:
+                detail += f" ({param})"
             if expected:
                 detail += f" → expects '{expected}'"
             self._add_step("dut_precheck", "DUT State Check", detail)
@@ -298,7 +314,16 @@ class FlowPreviewWidget(QWidget):
             dut_postread = test_point_data.get("dut_post_read_command")
             if dut_postread:
                 parser = test_point_data.get("dut_post_read_parser", "numeric")
-                self._add_step("dut_postread", "Read from DUT", f"Command: {dut_postread} (parse as {parser})")
+                param = test_point_data.get("dut_post_read_param", "")
+                csv_index = test_point_data.get("dut_post_read_index", 1)
+                detail = f"Command: {dut_postread}"
+                if param:
+                    detail += f" ({param})"
+                if parser == "csv_field":
+                    detail += f" → CSV field [{csv_index}]"
+                else:
+                    detail += f" (parse as {parser})"
+                self._add_step("dut_postread", "Read from DUT", detail)
             else:
                 self._add_step("measure", "Manual Reading Entry", "Technician enters measured value")
 
@@ -2044,8 +2069,7 @@ class ProceduresTab(QWidget):
         dut_remote_layout.addRow(dut_remote_header)
 
         dut_remote_info = QLabel(
-            "Configure commands to query DUT state before calibrator output\n"
-            "and capture readings after calibrator output."
+            "Configure commands to set up DUT, verify state, and capture readings."
         )
         dut_remote_info.setStyleSheet("color: gray; font-size: 10px;")
         dut_remote_info.setWordWrap(True)
@@ -2053,7 +2077,36 @@ class ProceduresTab(QWidget):
 
         dut_remote_layout.addRow(QLabel(""))  # Spacer
 
-        # Pre-Check Section
+        # Setup Command Section (send command to DUT to configure it)
+        setup_label = QLabel("Setup Command (configure DUT before test):")
+        setup_label.setStyleSheet("font-weight: bold;")
+        dut_remote_layout.addRow(setup_label)
+
+        self.dut_setup_cmd_combo = QComboBox()
+        self.dut_setup_cmd_combo.setEditable(True)
+        self.dut_setup_cmd_combo.addItem("")
+        # Add set and control commands from standard list
+        setup_categories = ["set", "control", "fluke789"]
+        setup_cmds = [cmd["name"] for cmd in STANDARD_DUT_COMMANDS if cmd["category"] in setup_categories]
+        self.dut_setup_cmd_combo.addItems(setup_cmds)
+        self.dut_setup_cmd_combo.setToolTip(
+            "Command to SEND to DUT to configure it (e.g., change range, set mode)"
+        )
+        dut_remote_layout.addRow("Command:", self.dut_setup_cmd_combo)
+
+        self.dut_setup_param_input = QLineEdit()
+        self.dut_setup_param_input.setPlaceholderText(
+            "e.g., '1' for PS R,{value} → PS R,1"
+        )
+        self.dut_setup_param_input.setToolTip(
+            "Value to substitute for {value} placeholder in command.\n"
+            "Example: Command 'PS R,{value}' with param '1' sends 'PS R,1'"
+        )
+        dut_remote_layout.addRow("Parameter:", self.dut_setup_param_input)
+
+        dut_remote_layout.addRow(QLabel(""))  # Spacer
+
+        # Pre-Check Section (query DUT to verify state)
         precheck_label = QLabel("Pre-Check (verify DUT state before output):")
         precheck_label.setStyleSheet("font-weight: bold;")
         dut_remote_layout.addRow(precheck_label)
@@ -2061,17 +2114,24 @@ class ProceduresTab(QWidget):
         self.dut_precheck_cmd_combo = QComboBox()
         self.dut_precheck_cmd_combo.setEditable(True)
         self.dut_precheck_cmd_combo.addItem("")
-        self.dut_precheck_cmd_combo.addItems([
-            "Query Position",
-            "Query Range",
-            "Query Mode",
-            "Query Function",
-            "Query Buttons",
-        ])
+        # Add state query and set commands from standard list
+        precheck_categories = ["state", "set", "control", "fluke789"]
+        precheck_cmds = [cmd["name"] for cmd in STANDARD_DUT_COMMANDS if cmd["category"] in precheck_categories]
+        self.dut_precheck_cmd_combo.addItems(precheck_cmds)
         self.dut_precheck_cmd_combo.setToolTip(
             "Command name from DUT command bank to query state"
         )
         dut_remote_layout.addRow("Command:", self.dut_precheck_cmd_combo)
+
+        self.dut_precheck_param_input = QLineEdit()
+        self.dut_precheck_param_input.setPlaceholderText(
+            "e.g., '1' for PS R,{value} → PS R,1"
+        )
+        self.dut_precheck_param_input.setToolTip(
+            "Value to substitute for {value} placeholder in command.\n"
+            "Example: Command 'PS R,{value}' with param '1' sends 'PS R,1'"
+        )
+        dut_remote_layout.addRow("Parameter:", self.dut_precheck_param_input)
 
         self.dut_precheck_expected_input = QLineEdit()
         self.dut_precheck_expected_input.setPlaceholderText(
@@ -2092,33 +2152,71 @@ class ProceduresTab(QWidget):
         self.dut_postread_cmd_combo = QComboBox()
         self.dut_postread_cmd_combo.setEditable(True)
         self.dut_postread_cmd_combo.addItem("")
-        self.dut_postread_cmd_combo.addItems([
-            "Read Value",
-            "Trigger Read",
-        ])
+        # Add measurement commands from standard list
+        postread_categories = ["measure", "fluke789"]
+        postread_cmds = [cmd["name"] for cmd in STANDARD_DUT_COMMANDS if cmd["category"] in postread_categories]
+        self.dut_postread_cmd_combo.addItems(postread_cmds)
         self.dut_postread_cmd_combo.setToolTip(
             "Command name from DUT command bank to capture reading"
         )
         dut_remote_layout.addRow("Command:", self.dut_postread_cmd_combo)
 
+        self.dut_postread_param_input = QLineEdit()
+        self.dut_postread_param_input.setPlaceholderText(
+            "e.g., '1' for VAL? {value} → VAL? 1"
+        )
+        self.dut_postread_param_input.setToolTip(
+            "Value to substitute for {value} placeholder in command.\n"
+            "Example: Command 'VAL? {value}' with param '1' sends 'VAL? 1'"
+        )
+        dut_remote_layout.addRow("Parameter:", self.dut_postread_param_input)
+
         self.dut_postread_parser_combo = QComboBox()
         self.dut_postread_parser_combo.addItems([
             "numeric",
+            "csv_field",
             "string",
         ])
         self.dut_postread_parser_combo.setToolTip(
             "How to parse the DUT response:\n"
             "- numeric: Extract first number from response\n"
+            "- csv_field: Extract value from comma-separated field (set index below)\n"
             "- string: Use raw response"
         )
         dut_remote_layout.addRow("Parser:", self.dut_postread_parser_combo)
+
+        # CSV field index for comma-separated responses
+        self.dut_postread_index_input = QSpinBox()
+        self.dut_postread_index_input.setRange(0, 20)
+        self.dut_postread_index_input.setValue(1)  # Default to position 1 (second field)
+        self.dut_postread_index_input.setToolTip(
+            "For CSV responses like 'QM,+0.000E+00,VDC,AUTO':\n"
+            "Position 0 = QM (command echo)\n"
+            "Position 1 = +0.000E+00 (the reading)\n"
+            "Position 2 = VDC (function)\n"
+            "Position 3 = AUTO (range)\n\n"
+            "Set to the position containing your reading value."
+        )
+        dut_remote_layout.addRow("CSV Position:", self.dut_postread_index_input)
+
+        # Example showing 0-based indexing
+        csv_example_label = QLabel(
+            "Example: CMD,+1.234E+00,VDC,AUTO,FAST\n"
+            "            [0]    [1]      [2]  [3]   [4]\n"
+            "Position starts at 0, not 1!"
+        )
+        csv_example_label.setStyleSheet("color: #888; font-size: 9px; font-family: monospace;")
+        dut_remote_layout.addRow("", csv_example_label)
 
         dut_remote_layout.addRow(QLabel(""))  # Spacer
 
         # Note about command bank
         note_label = QLabel(
             "Note: Commands must be defined in the DUT's command bank\n"
-            "(Remote tab → DUT Command Banks)"
+            "(Remote tab → DUT Command Banks)\n\n"
+            "Tip: Use {value} in command strings (e.g., 'PS R,{value}')\n"
+            "and set Parameter to substitute the value.\n\n"
+            "For CSV responses, use 'csv_field' parser and set the position."
         )
         note_label.setStyleSheet("color: #666; font-style: italic; font-size: 10px;")
         note_label.setWordWrap(True)
@@ -2169,10 +2267,15 @@ class ProceduresTab(QWidget):
         # Formula
         self.formula_input.textChanged.connect(self._update_flow_preview)
         # DUT Remote
+        self.dut_setup_cmd_combo.currentTextChanged.connect(self._update_flow_preview)
+        self.dut_setup_param_input.textChanged.connect(self._update_flow_preview)
         self.dut_precheck_cmd_combo.currentTextChanged.connect(self._update_flow_preview)
+        self.dut_precheck_param_input.textChanged.connect(self._update_flow_preview)
         self.dut_precheck_expected_input.textChanged.connect(self._update_flow_preview)
         self.dut_postread_cmd_combo.currentTextChanged.connect(self._update_flow_preview)
+        self.dut_postread_param_input.textChanged.connect(self._update_flow_preview)
         self.dut_postread_parser_combo.currentTextChanged.connect(self._update_flow_preview)
+        self.dut_postread_index_input.valueChanged.connect(self._update_flow_preview)
 
     def _on_test_type_changed(self, index: int):
         """Show/hide tabs based on selected test type."""
@@ -2259,10 +2362,15 @@ class ProceduresTab(QWidget):
         # DMM config
         self._clear_dmm_config()
         # DUT Remote
+        self.dut_setup_cmd_combo.setCurrentIndex(0)
+        self.dut_setup_param_input.clear()
         self.dut_precheck_cmd_combo.setCurrentIndex(0)
+        self.dut_precheck_param_input.clear()
         self.dut_precheck_expected_input.clear()
         self.dut_postread_cmd_combo.setCurrentIndex(0)
+        self.dut_postread_param_input.clear()
         self.dut_postread_parser_combo.setCurrentIndex(0)
+        self.dut_postread_index_input.setValue(1)
         # Clear flow preview
         self.flow_preview.update_flow(None)
 
@@ -2335,10 +2443,15 @@ class ProceduresTab(QWidget):
             # Formula
             "formula": self.formula_input.text() or None,
             # DUT Remote
+            "dut_setup_command": self.dut_setup_cmd_combo.currentText() or None,
+            "dut_setup_param": self.dut_setup_param_input.text() or None,
             "dut_pre_check_command": self.dut_precheck_cmd_combo.currentText() or None,
+            "dut_pre_check_param": self.dut_precheck_param_input.text() or None,
             "dut_pre_check_expected": self.dut_precheck_expected_input.text() or None,
             "dut_post_read_command": self.dut_postread_cmd_combo.currentText() or None,
+            "dut_post_read_param": self.dut_postread_param_input.text() or None,
             "dut_post_read_parser": self.dut_postread_parser_combo.currentText() or None,
+            "dut_post_read_index": self.dut_postread_index_input.value(),
         }
 
         self.flow_preview.update_flow(data)
@@ -3797,6 +3910,18 @@ class ProceduresTab(QWidget):
                 self._load_dmm_config(tp.dmm_config)
 
                 # DUT Remote configuration
+                # Setup command
+                if tp.dut_setup_command:
+                    idx = self.dut_setup_cmd_combo.findText(tp.dut_setup_command)
+                    if idx >= 0:
+                        self.dut_setup_cmd_combo.setCurrentIndex(idx)
+                    else:
+                        self.dut_setup_cmd_combo.setCurrentText(tp.dut_setup_command)
+                else:
+                    self.dut_setup_cmd_combo.setCurrentIndex(0)
+                self.dut_setup_param_input.setText(tp.dut_setup_param or "")
+
+                # Pre-check command
                 if tp.dut_pre_check_command:
                     idx = self.dut_precheck_cmd_combo.findText(tp.dut_pre_check_command)
                     if idx >= 0:
@@ -3806,6 +3931,7 @@ class ProceduresTab(QWidget):
                 else:
                     self.dut_precheck_cmd_combo.setCurrentIndex(0)
 
+                self.dut_precheck_param_input.setText(tp.dut_pre_check_param or "")
                 self.dut_precheck_expected_input.setText(tp.dut_pre_check_expected or "")
 
                 if tp.dut_post_read_command:
@@ -3817,12 +3943,20 @@ class ProceduresTab(QWidget):
                 else:
                     self.dut_postread_cmd_combo.setCurrentIndex(0)
 
+                self.dut_postread_param_input.setText(tp.dut_post_read_param or "")
+
                 if tp.dut_post_read_parser:
                     idx = self.dut_postread_parser_combo.findText(tp.dut_post_read_parser)
                     if idx >= 0:
                         self.dut_postread_parser_combo.setCurrentIndex(idx)
                 else:
                     self.dut_postread_parser_combo.setCurrentIndex(0)
+
+                # CSV field index
+                if tp.dut_post_read_index is not None:
+                    self.dut_postread_index_input.setValue(tp.dut_post_read_index)
+                else:
+                    self.dut_postread_index_input.setValue(1)  # Default to position 1
 
                 logger.debug(f"Loaded test point: {tp_id}")
 
@@ -4008,14 +4142,26 @@ class ProceduresTab(QWidget):
                     tp.dmm_config = None
 
                 # DUT Remote configuration
+                # Setup command
+                setup_cmd = self.dut_setup_cmd_combo.currentText().strip()
+                tp.dut_setup_command = setup_cmd if setup_cmd else None
+                setup_param = self.dut_setup_param_input.text().strip()
+                tp.dut_setup_param = setup_param if setup_param else None
+                # Pre-check command
                 precheck_cmd = self.dut_precheck_cmd_combo.currentText().strip()
                 tp.dut_pre_check_command = precheck_cmd if precheck_cmd else None
+                precheck_param = self.dut_precheck_param_input.text().strip()
+                tp.dut_pre_check_param = precheck_param if precheck_param else None
                 precheck_expected = self.dut_precheck_expected_input.text().strip()
                 tp.dut_pre_check_expected = precheck_expected if precheck_expected else None
                 postread_cmd = self.dut_postread_cmd_combo.currentText().strip()
                 tp.dut_post_read_command = postread_cmd if postread_cmd else None
+                postread_param = self.dut_postread_param_input.text().strip()
+                tp.dut_post_read_param = postread_param if postread_param else None
                 postread_parser = self.dut_postread_parser_combo.currentText().strip()
                 tp.dut_post_read_parser = postread_parser if postread_parser else None
+                # CSV field index
+                tp.dut_post_read_index = self.dut_postread_index_input.value()
 
                 # Update tree display - for Pass/Fail show operational check, for others show nominal
                 if tp.test_type.value == "pass_fail":

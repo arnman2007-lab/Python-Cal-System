@@ -561,10 +561,18 @@ class TestPoint(Base):
     dmm_config = Column(JSON, nullable=True, comment="DMM settings: func, range, nplc, ndig, azero, etc.")
 
     # DUT Remote Communication
+    # Setup command - sent to DUT to configure it (e.g., change range, set mode)
+    dut_setup_command = Column(String(50), nullable=True, comment="DUT command ref to send before test (e.g., Set Range)")
+    dut_setup_param = Column(String(100), nullable=True, comment="Parameter value to substitute into setup command {value}")
+    # Pre-check - query DUT to verify state before calibrator output
     dut_pre_check_command = Column(String(50), nullable=True, comment="DUT command ref for pre-check (e.g., Query Position)")
+    dut_pre_check_param = Column(String(100), nullable=True, comment="Parameter value to substitute into pre-check command {value}")
     dut_pre_check_expected = Column(String(100), nullable=True, comment="Expected response pattern/value")
+    # Post-read - read measurement from DUT after calibrator output
     dut_post_read_command = Column(String(50), nullable=True, comment="DUT command ref for post-read (e.g., Read Value)")
+    dut_post_read_param = Column(String(100), nullable=True, comment="Parameter value to substitute into post-read command {value}")
     dut_post_read_parser = Column(String(50), nullable=True, comment="Parser type: numeric, string, regex")
+    dut_post_read_index = Column(Integer, nullable=True, comment="For CSV responses, which field contains the value (0-based index)")
 
     description = Column(Text, nullable=True)
 
@@ -730,17 +738,39 @@ DEFAULT_COMMAND_REFERENCES = [
 STANDARD_DUT_COMMANDS = [
     # Control commands
     {"name": "Identity", "description": "Query device identity", "default_command": "*IDN?", "category": "control"},
+    {"name": "Reset", "description": "Reset device to default state", "default_command": "*RST", "category": "control"},
+    {"name": "Clear", "description": "Clear status/errors", "default_command": "*CLS", "category": "control"},
 
-    # State query commands
+    # State query commands - Pre-check
     {"name": "Query Position", "description": "Query knob/switch position", "default_command": "", "category": "state"},
     {"name": "Query Range", "description": "Query current range setting", "default_command": "", "category": "state"},
     {"name": "Query Mode", "description": "Query measurement mode (DC/AC)", "default_command": "", "category": "state"},
     {"name": "Query Function", "description": "Query current function (V/A/Ohm)", "default_command": "", "category": "state"},
     {"name": "Query Buttons", "description": "Query button states", "default_command": "", "category": "state"},
+    {"name": "Query Status", "description": "Query device status", "default_command": "", "category": "state"},
+    {"name": "Query Scale", "description": "Query scale/multiplier setting", "default_command": "", "category": "state"},
+    {"name": "Query Input", "description": "Query which input is selected", "default_command": "", "category": "state"},
+    {"name": "Query Terminal", "description": "Query terminal selection (front/rear)", "default_command": "", "category": "state"},
 
-    # Measurement commands
+    # Set commands - with {value} placeholder
+    {"name": "Set Position", "description": "Set knob/switch position (use {value})", "default_command": "PS {value}", "category": "set"},
+    {"name": "Set Range", "description": "Set range (use {value})", "default_command": "", "category": "set"},
+    {"name": "Set Mode", "description": "Set mode DC/AC (use {value})", "default_command": "", "category": "set"},
+    {"name": "Set Function", "description": "Set function (use {value})", "default_command": "", "category": "set"},
+
+    # Measurement commands - Post-read
     {"name": "Read Value", "description": "Read current measurement value", "default_command": "", "category": "measure"},
+    {"name": "Read Primary", "description": "Read primary display value", "default_command": "", "category": "measure"},
+    {"name": "Read Secondary", "description": "Read secondary display value", "default_command": "", "category": "measure"},
     {"name": "Trigger Read", "description": "Trigger measurement and read", "default_command": "", "category": "measure"},
+    {"name": "Fetch", "description": "Fetch last measurement", "default_command": "FETCH?", "category": "measure"},
+    {"name": "Read All", "description": "Read all display values", "default_command": "", "category": "measure"},
+
+    # Fluke 789 specific (common process meter)
+    {"name": "789 Query Position", "description": "Fluke 789 rotary switch position", "default_command": "QP", "category": "fluke789"},
+    {"name": "789 Query Range", "description": "Fluke 789 range query", "default_command": "QR", "category": "fluke789"},
+    {"name": "789 Read Value", "description": "Fluke 789 read measurement", "default_command": "VAL?", "category": "fluke789"},
+    {"name": "789 Set Position", "description": "Fluke 789 set position (use {value})", "default_command": "PS R,{value}", "category": "fluke789"},
 ]
 
 
