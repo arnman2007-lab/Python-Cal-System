@@ -300,6 +300,62 @@ class WorkstationStandard(Base):
 
 
 # =============================================================================
+# Model Database (Manufacturer, LabCode, DeviceModel)
+# =============================================================================
+
+
+class Manufacturer(Base):
+    """Equipment manufacturer (e.g., Fluke, Keysight)."""
+
+    __tablename__ = "manufacturers"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(100), nullable=False, unique=True)
+    created_at = Column(DateTime, server_default=func.now())
+
+    # Relationships
+    device_models = relationship("DeviceModel", back_populates="manufacturer")
+
+
+class LabCode(Base):
+    """Calibration lab codes (e.g., M=Meters, N=High Voltage)."""
+
+    __tablename__ = "lab_codes"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    code = Column(String(10), nullable=False, unique=True)
+    description = Column(String(200), nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+
+    # Relationships
+    device_models = relationship("DeviceModel", back_populates="lab_code")
+
+
+class DeviceModel(Base):
+    """Device model definition (e.g., Fluke 789 Processmeter)."""
+
+    __tablename__ = "device_models"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    manufacturer_id = Column(Integer, ForeignKey("manufacturers.id"), nullable=False)
+    model_number = Column(String(100), nullable=False)
+    description = Column(String(200), nullable=True, comment="e.g., Processmeter, True RMS DMM")
+    lab_code_id = Column(Integer, ForeignKey("lab_codes.id"), nullable=True)
+    remote_capable = Column(Boolean, default=False, comment="Can be automated via GPIB/USB")
+    created_at = Column(DateTime, server_default=func.now())
+
+    # Relationships
+    manufacturer = relationship("Manufacturer", back_populates="device_models")
+    lab_code = relationship("LabCode", back_populates="device_models")
+    duts = relationship("DUT", back_populates="device_model")
+
+    __table_args__ = (
+        UniqueConstraint("manufacturer_id", "model_number", name="uq_device_model"),
+        Index("ix_device_model_manufacturer", "manufacturer_id"),
+    )
+
+
+# =============================================================================
 # DUT Models
 # =============================================================================
 
@@ -311,6 +367,11 @@ class DUT(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     asset_number = Column(String(100), nullable=False, unique=True, index=True)
+
+    # Model reference (optional - can use this OR make/model fields)
+    device_model_id = Column(Integer, ForeignKey("device_models.id"), nullable=True)
+
+    # Legacy make/model fields (kept for backwards compatibility)
     make = Column(String(100), nullable=False)
     model = Column(String(100), nullable=False)
     serial_number = Column(String(100), nullable=True)
@@ -324,6 +385,7 @@ class DUT(Base):
     remote_capable = Column(Boolean, default=False)
     preferred_input_method = Column(Enum(InputMethod), default=InputMethod.KEYBOARD)
     ocr_mode = Column(String(20), default="standard", comment="standard or seven_segment")
+    com_port = Column(String(20), nullable=True, comment="COM port for serial communication (e.g., COM3)")
 
     # Calibration tracking
     calibration_interval_days = Column(Integer, default=365)
@@ -337,6 +399,7 @@ class DUT(Base):
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
     # Relationships
+    device_model = relationship("DeviceModel", back_populates="duts")
     default_procedure = relationship("Procedure", back_populates="assigned_duts")
     calibration_sessions = relationship("CalibrationSession", back_populates="dut")
     command_bank = relationship("CommandBank", back_populates="dut", uselist=False)
@@ -496,6 +559,12 @@ class TestPoint(Base):
     # DMM configuration - stored as JSON for flexibility across different DMM models
     # Structure: {"model": "3458A", "func": "DCV", "range": "AUTO", "nplc": "100", ...}
     dmm_config = Column(JSON, nullable=True, comment="DMM settings: func, range, nplc, ndig, azero, etc.")
+
+    # DUT Remote Communication
+    dut_pre_check_command = Column(String(50), nullable=True, comment="DUT command ref for pre-check (e.g., Query Position)")
+    dut_pre_check_expected = Column(String(100), nullable=True, comment="Expected response pattern/value")
+    dut_post_read_command = Column(String(50), nullable=True, comment="DUT command ref for post-read (e.g., Read Value)")
+    dut_post_read_parser = Column(String(50), nullable=True, comment="Parser type: numeric, string, regex")
 
     description = Column(Text, nullable=True)
 
@@ -657,6 +726,24 @@ DEFAULT_COMMAND_REFERENCES = [
 ]
 
 
+# Standard DUT command references for remote DUT communication
+STANDARD_DUT_COMMANDS = [
+    # Control commands
+    {"name": "Identity", "description": "Query device identity", "default_command": "*IDN?", "category": "control"},
+
+    # State query commands
+    {"name": "Query Position", "description": "Query knob/switch position", "default_command": "", "category": "state"},
+    {"name": "Query Range", "description": "Query current range setting", "default_command": "", "category": "state"},
+    {"name": "Query Mode", "description": "Query measurement mode (DC/AC)", "default_command": "", "category": "state"},
+    {"name": "Query Function", "description": "Query current function (V/A/Ohm)", "default_command": "", "category": "state"},
+    {"name": "Query Buttons", "description": "Query button states", "default_command": "", "category": "state"},
+
+    # Measurement commands
+    {"name": "Read Value", "description": "Read current measurement value", "default_command": "", "category": "measure"},
+    {"name": "Trigger Read", "description": "Trigger measurement and read", "default_command": "", "category": "measure"},
+]
+
+
 class CommandBank(Base):
     """Command set for a specific device model."""
 
@@ -685,6 +772,33 @@ class CommandBank(Base):
     __table_args__ = (
         UniqueConstraint("make", "model", name="uq_command_bank_device"),
         Index("ix_command_bank_make_model", "make", "model"),
+    )
+
+
+class DUTCommandBank(Base):
+    """Command bank for DUT models - per make/model for remote communication."""
+
+    __tablename__ = "dut_command_banks"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    make = Column(String(100), nullable=False)
+    model = Column(String(100), nullable=False)
+    description = Column(Text, nullable=True)
+    communication_type = Column(String(20), default="serial", comment="serial, gpib, usb")
+
+    # Serial port settings (JSON): {baud_rate, data_bits, parity, stop_bits, timeout}
+    serial_config = Column(JSON, nullable=True, comment="Serial port configuration")
+
+    # Commands stored as JSON
+    # Format: {"QUERY_POSITION": {"command": "QP", "delay_before": 0, "delay_after": 0.1}, ...}
+    commands = Column(JSON, nullable=True, comment="Dict of command_name: {command, delay_before, delay_after}")
+
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("make", "model", name="uq_dut_command_bank"),
+        Index("ix_dut_command_bank_make_model", "make", "model"),
     )
 
 

@@ -20,7 +20,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QSizePolicy,
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QFont
 
 from calsystem.database.connection import get_db
@@ -124,6 +124,9 @@ class ChangelogEntryWidget(QFrame):
 
 class ChangelogTab(QWidget):
     """Tab for viewing and adding changelog entries."""
+
+    # Signal emitted when a new version is added (passes the version string)
+    version_changed = pyqtSignal(str)
 
     def __init__(self):
         super().__init__()
@@ -402,6 +405,9 @@ class ChangelogTab(QWidget):
             self.type_combo.setCurrentIndex(0)
             self._toggle_entry_form()
             self._load_changelog()
+
+            # Emit signal so main window can update title
+            self.version_changed.emit(new_version)
 
             QMessageBox.information(
                 self, "Entry Saved", f"Changelog entry saved.\nNew version: {new_version}"

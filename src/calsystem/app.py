@@ -30,7 +30,7 @@ class CalsystemApp(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Calsystem v0.1.0 - Calibration Management System")
+        self.setWindowTitle("Calsystem - Calibration Management System")
         self.setMinimumSize(1200, 800)
 
         # Initialize components
@@ -131,6 +131,11 @@ class CalsystemApp(QMainWindow):
         """Update the window title with the current version."""
         version = self._get_current_version()
         self.setWindowTitle(f"Calsystem v{version} - Calibration Management System")
+
+    def _on_version_changed(self, new_version: str):
+        """Handle version change from changelog tab."""
+        self.setWindowTitle(f"Calsystem v{new_version} - Calibration Management System")
+        logger.info(f"Version updated to {new_version}")
 
     def _init_menu_bar(self):
         """Initialize the menu bar."""
@@ -256,6 +261,7 @@ class CalsystemApp(QMainWindow):
         from calsystem.ui.execution.execution_tab import ExecutionTab
         from calsystem.ui.reports.reports_tab import ReportsTab
         from calsystem.ui.libraries.libraries_tab import LibrariesTab
+        from calsystem.ui.remote.remote_tab import RemoteTab
         from calsystem.ui.changelog.changelog_tab import ChangelogTab
 
         # Add tabs
@@ -271,6 +277,9 @@ class CalsystemApp(QMainWindow):
         self.libraries_tab = LibrariesTab()
         self.tabs.addTab(self.libraries_tab, "Libraries")
 
+        self.remote_tab = RemoteTab()
+        self.tabs.addTab(self.remote_tab, "Remote")
+
         self.execution_tab = ExecutionTab()
         self.tabs.addTab(self.execution_tab, "Run Test")
 
@@ -278,6 +287,7 @@ class CalsystemApp(QMainWindow):
         self.tabs.addTab(self.reports_tab, "Reports")
 
         self.changelog_tab = ChangelogTab()
+        self.changelog_tab.version_changed.connect(self._on_version_changed)
         self.tabs.addTab(self.changelog_tab, "Changelog")
 
         self.setCentralWidget(self.tabs)

@@ -82,6 +82,12 @@ class TestPointData:
     excel_sheet: Optional[str] = None
     excel_cell: Optional[str] = None
 
+    # DUT Remote Communication
+    dut_pre_check_command: Optional[str] = None
+    dut_pre_check_expected: Optional[str] = None
+    dut_post_read_command: Optional[str] = None
+    dut_post_read_parser: Optional[str] = None
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
         return {
@@ -127,6 +133,10 @@ class TestPointData:
             "excel_workbook": self.excel_workbook,
             "excel_sheet": self.excel_sheet,
             "excel_cell": self.excel_cell,
+            "dut_pre_check_command": self.dut_pre_check_command,
+            "dut_pre_check_expected": self.dut_pre_check_expected,
+            "dut_post_read_command": self.dut_post_read_command,
+            "dut_post_read_parser": self.dut_post_read_parser,
         }
 
     @classmethod
@@ -175,6 +185,10 @@ class TestPointData:
             excel_workbook=data.get("excel_workbook"),
             excel_sheet=data.get("excel_sheet"),
             excel_cell=data.get("excel_cell"),
+            dut_pre_check_command=data.get("dut_pre_check_command"),
+            dut_pre_check_expected=data.get("dut_pre_check_expected"),
+            dut_post_read_command=data.get("dut_post_read_command"),
+            dut_post_read_parser=data.get("dut_post_read_parser"),
         )
 
 
