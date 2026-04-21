@@ -509,6 +509,7 @@ class RemoteTab(QWidget):
 
         # Also load autocomplete data
         self._load_make_suggestions()
+        self._update_model_suggestions("")  # Load all models initially
 
     def _load_make_suggestions(self):
         """Load manufacturer names for autocomplete."""
