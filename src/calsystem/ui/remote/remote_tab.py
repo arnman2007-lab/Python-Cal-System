@@ -185,11 +185,18 @@ class RemoteTab(QWidget):
         list_group = QGroupBox("Command Banks")
         list_layout = QVBoxLayout(list_group)
 
-        # Search
+        # Search with autocomplete
         search_layout = QHBoxLayout()
         self.bank_search_input = QLineEdit()
         self.bank_search_input.setPlaceholderText("Search by make/model...")
         self.bank_search_input.textChanged.connect(self._filter_banks)
+        # Autocomplete for existing banks
+        self._bank_search_completer = QCompleter()
+        self._bank_search_completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self._bank_search_completer.setFilterMode(Qt.MatchFlag.MatchContains)
+        self._bank_search_model = QStringListModel()
+        self._bank_search_completer.setModel(self._bank_search_model)
+        self.bank_search_input.setCompleter(self._bank_search_completer)
         search_layout.addWidget(self.bank_search_input)
         list_layout.addLayout(search_layout)
 
@@ -494,6 +501,7 @@ class RemoteTab(QWidget):
                 ).all()
 
                 self.bank_table.setRowCount(len(banks))
+                search_suggestions = []
 
                 for row, bank in enumerate(banks):
                     # Make
@@ -514,6 +522,14 @@ class RemoteTab(QWidget):
                     # Comm type
                     type_item = QTableWidgetItem(bank.communication_type or "serial")
                     self.bank_table.setItem(row, 3, type_item)
+
+                    # Add to search suggestions
+                    search_suggestions.append(f"{bank.make} {bank.model}")
+                    search_suggestions.append(bank.make)
+                    search_suggestions.append(bank.model)
+
+                # Update search autocomplete with unique values
+                self._bank_search_model.setStringList(sorted(set(search_suggestions)))
 
         except Exception as e:
             logger.error(f"Failed to load command banks: {e}")

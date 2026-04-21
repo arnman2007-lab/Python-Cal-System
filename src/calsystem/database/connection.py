@@ -148,6 +148,29 @@ class DatabaseManager:
             with self._engine.connect() as conn:
                 if getattr(self, '_is_sqlite', False):
                     # SQLite migrations
+
+                    # Ensure dut_command_banks table exists
+                    result = conn.execute(text(
+                        "SELECT name FROM sqlite_master WHERE type='table' AND name='dut_command_banks'"
+                    ))
+                    if not result.fetchone():
+                        conn.execute(text("""
+                            CREATE TABLE dut_command_banks (
+                                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                make VARCHAR(100) NOT NULL,
+                                model VARCHAR(100) NOT NULL,
+                                description TEXT,
+                                communication_type VARCHAR(20) DEFAULT 'serial',
+                                serial_config JSON,
+                                commands JSON,
+                                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                                UNIQUE(make, model)
+                            )
+                        """))
+                        conn.commit()
+                        logger.info("Created dut_command_banks table")
+
                     # Check is_active column in workstation_standards
                     result = conn.execute(text("PRAGMA table_info(workstation_standards)"))
                     columns = [row[1] for row in result.fetchall()]
