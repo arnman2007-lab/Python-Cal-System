@@ -49,6 +49,12 @@ class RemoteTab(QWidget):
         self._load_command_banks()
         self._start_port_scanning()
 
+    def showEvent(self, event):
+        """Refresh data when tab is shown."""
+        super().showEvent(event)
+        # Reload model suggestions in case library was updated
+        self._load_bank_model_suggestions()
+
     def _init_ui(self):
         """Initialize the UI layout."""
         layout = QVBoxLayout(self)
@@ -565,7 +571,7 @@ class RemoteTab(QWidget):
                 string_model = QStringListModel(completion_list)
                 self._bank_model_completer.setModel(string_model)
 
-                logger.debug(f"Loaded {len(completion_list)} models into command bank search")
+                logger.info(f"Loaded {len(completion_list)} models into command bank search: {completion_list[:5]}")
 
         except Exception as e:
             logger.error(f"Failed to load bank model suggestions: {e}")
