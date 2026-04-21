@@ -307,6 +307,25 @@ class DatabaseManager:
                         conn.commit()
                         logger.info("Added device_model_id column to duts")
 
+                    # DUT remote communication - com_port field
+                    if 'com_port' not in dut_columns:
+                        conn.execute(text("ALTER TABLE duts ADD COLUMN com_port VARCHAR(20)"))
+                        conn.commit()
+                        logger.info("Added com_port column to duts")
+
+                    # DUT remote fields for test_points
+                    dut_remote_columns = [
+                        ('dut_pre_check_command', 'VARCHAR(50)'),
+                        ('dut_pre_check_expected', 'VARCHAR(100)'),
+                        ('dut_post_read_command', 'VARCHAR(50)'),
+                        ('dut_post_read_parser', 'VARCHAR(50)'),
+                    ]
+                    for col_name, col_type in dut_remote_columns:
+                        if col_name not in columns:
+                            conn.execute(text(f"ALTER TABLE test_points ADD COLUMN {col_name} {col_type}"))
+                            conn.commit()
+                            logger.info(f"Added {col_name} column to test_points")
+
                 else:
                     # MySQL migrations
                     # Check is_active column
@@ -533,6 +552,33 @@ class DatabaseManager:
                         conn.execute(text("ALTER TABLE duts ADD COLUMN device_model_id INTEGER"))
                         conn.commit()
                         logger.info("Added device_model_id column to duts")
+
+                    # DUT remote communication - com_port field
+                    result = conn.execute(text(
+                        "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                        "WHERE TABLE_NAME = 'duts' AND COLUMN_NAME = 'com_port'"
+                    ))
+                    if not result.fetchone():
+                        conn.execute(text("ALTER TABLE duts ADD COLUMN com_port VARCHAR(20)"))
+                        conn.commit()
+                        logger.info("Added com_port column to duts")
+
+                    # DUT remote fields for test_points
+                    dut_remote_columns = [
+                        ('dut_pre_check_command', 'VARCHAR(50)'),
+                        ('dut_pre_check_expected', 'VARCHAR(100)'),
+                        ('dut_post_read_command', 'VARCHAR(50)'),
+                        ('dut_post_read_parser', 'VARCHAR(50)'),
+                    ]
+                    for col_name, col_type in dut_remote_columns:
+                        result = conn.execute(text(
+                            f"SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                            f"WHERE TABLE_NAME = 'test_points' AND COLUMN_NAME = '{col_name}'"
+                        ))
+                        if not result.fetchone():
+                            conn.execute(text(f"ALTER TABLE test_points ADD COLUMN {col_name} {col_type}"))
+                            conn.commit()
+                            logger.info(f"Added {col_name} column to test_points")
 
         except Exception as e:
             logger.warning(f"Migration check: {e}")
