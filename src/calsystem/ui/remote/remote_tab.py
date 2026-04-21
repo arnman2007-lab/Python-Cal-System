@@ -23,13 +23,14 @@ from PyQt6.QtWidgets import (
     QDoubleSpinBox,
     QTextEdit,
     QAbstractItemView,
+    QCompleter,
 )
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, QStringListModel
 from PyQt6.QtGui import QColor
 from loguru import logger
 
 from calsystem.database.connection import get_db
-from calsystem.database.models import DUTCommandBank, STANDARD_DUT_COMMANDS
+from calsystem.database.models import DUTCommandBank, STANDARD_DUT_COMMANDS, DeviceModel, Manufacturer
 from calsystem.instruments.serial_manager import (
     get_serial_manager,
     SerialConfig,
@@ -228,10 +229,26 @@ class RemoteTab(QWidget):
 
         self.bank_make_input = QLineEdit()
         self.bank_make_input.setPlaceholderText("e.g., Fluke")
+        # Add autocomplete for make
+        self._make_completer = QCompleter()
+        self._make_completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self._make_completer.setFilterMode(Qt.MatchFlag.MatchContains)
+        self._make_model = QStringListModel()
+        self._make_completer.setModel(self._make_model)
+        self.bank_make_input.setCompleter(self._make_completer)
+        # Update model suggestions when make changes
+        self.bank_make_input.textChanged.connect(self._update_model_suggestions)
         info_layout.addRow("Make:", self.bank_make_input)
 
         self.bank_model_input = QLineEdit()
         self.bank_model_input.setPlaceholderText("e.g., 789")
+        # Add autocomplete for model
+        self._model_completer = QCompleter()
+        self._model_completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self._model_completer.setFilterMode(Qt.MatchFlag.MatchContains)
+        self._model_model = QStringListModel()
+        self._model_completer.setModel(self._model_model)
+        self.bank_model_input.setCompleter(self._model_completer)
         info_layout.addRow("Model:", self.bank_model_input)
 
         self.comm_type_combo = QComboBox()
@@ -489,6 +506,81 @@ class RemoteTab(QWidget):
 
         except Exception as e:
             logger.error(f"Failed to load command banks: {e}")
+
+        # Also load autocomplete data
+        self._load_make_suggestions()
+
+    def _load_make_suggestions(self):
+        """Load manufacturer names for autocomplete."""
+        makes = set()
+        db = get_db()
+        if not db.is_connected:
+            return
+
+        try:
+            with db.session() as session:
+                # Get makes from existing command banks
+                banks = session.query(DUTCommandBank.make).distinct().all()
+                for (make,) in banks:
+                    if make:
+                        makes.add(make)
+
+                # Also get makes from device model library
+                manufacturers = session.query(Manufacturer.name).all()
+                for (name,) in manufacturers:
+                    if name:
+                        makes.add(name)
+
+            self._make_model.setStringList(sorted(makes))
+            logger.debug(f"Loaded {len(makes)} make suggestions")
+
+        except Exception as e:
+            logger.error(f"Failed to load make suggestions: {e}")
+
+    def _update_model_suggestions(self, make_text: str):
+        """Update model suggestions based on current make."""
+        models = set()
+        db = get_db()
+        if not db.is_connected:
+            self._model_model.setStringList([])
+            return
+
+        try:
+            with db.session() as session:
+                # Get models from existing command banks for this make
+                if make_text:
+                    banks = session.query(DUTCommandBank.model).filter(
+                        DUTCommandBank.make.ilike(f"%{make_text}%")
+                    ).distinct().all()
+                    for (model,) in banks:
+                        if model:
+                            models.add(model)
+
+                    # Also get models from device model library
+                    device_models = session.query(DeviceModel.model_number).join(
+                        Manufacturer
+                    ).filter(
+                        Manufacturer.name.ilike(f"%{make_text}%")
+                    ).all()
+                    for (model_num,) in device_models:
+                        if model_num:
+                            models.add(model_num)
+                else:
+                    # If no make entered, show all models
+                    banks = session.query(DUTCommandBank.model).distinct().all()
+                    for (model,) in banks:
+                        if model:
+                            models.add(model)
+
+                    device_models = session.query(DeviceModel.model_number).all()
+                    for (model_num,) in device_models:
+                        if model_num:
+                            models.add(model_num)
+
+            self._model_model.setStringList(sorted(models))
+
+        except Exception as e:
+            logger.error(f"Failed to update model suggestions: {e}")
 
     def _filter_banks(self, text: str):
         """Filter command banks by search text."""
