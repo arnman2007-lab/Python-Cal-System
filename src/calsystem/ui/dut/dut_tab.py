@@ -25,12 +25,14 @@ from PyQt6.QtWidgets import (
     QSpinBox,
     QDateEdit,
     QMessageBox,
+    QCompleter,
+    QListView,
 )
-from PyQt6.QtCore import Qt, QDate
+from PyQt6.QtCore import Qt, QDate, QStringListModel
 from loguru import logger
 
 from calsystem.database.connection import get_db
-from calsystem.database.models import DUT, InputMethod, Procedure, CalibrationSession
+from calsystem.database.models import DUT, InputMethod, Procedure, CalibrationSession, DeviceModel
 
 
 class DUTTab(QWidget):
@@ -39,6 +41,7 @@ class DUTTab(QWidget):
     def __init__(self):
         super().__init__()
         self._current_dut_id: Optional[int] = None  # ID of DUT being edited, None for new
+        self._selected_device_model_id: Optional[int] = None  # ID of DeviceModel if selected from autocomplete
         self._init_ui()
         self._connect_signals()
 
@@ -49,6 +52,7 @@ class DUTTab(QWidget):
         self._refresh_due_table()
         self._refresh_dut_table()
         self._load_procedures()
+        self._load_device_models()  # Refresh model dropdown
 
     def _init_ui(self):
         """Initialize the UI."""
@@ -166,10 +170,30 @@ class DUTTab(QWidget):
         asset_layout.addWidget(self.manual_asset_check)
         info_layout.addRow("Asset Number:", asset_layout)
 
+        # Model search with autocomplete - type model number to search
+        self.model_search_input = QLineEdit()
+        self.model_search_input.setPlaceholderText("Type model number to search (e.g., 789, 87V)...")
+        self.model_search_input.setToolTip("Start typing a model number to see matching devices from the library")
+        info_layout.addRow("Find Model:", self.model_search_input)
+
+        # Autocomplete setup - will be populated in _load_device_models
+        self._model_data = {}  # Maps display string to model info dict
+        self.model_completer = QCompleter()
+        self.model_completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self.model_completer.setFilterMode(Qt.MatchFlag.MatchContains)
+        self.model_completer.setMaxVisibleItems(10)
+        # Use popup to show full text
+        popup = QListView()
+        popup.setMinimumWidth(350)
+        self.model_completer.setPopup(popup)
+        self.model_search_input.setCompleter(self.model_completer)
+
+        # Make input (auto-filled from model search or manual entry)
         self.make_input = QLineEdit()
         self.make_input.setPlaceholderText("e.g., Fluke, Keysight")
         info_layout.addRow("Make:", self.make_input)
 
+        # Model input (auto-filled from model search or manual entry)
         self.model_input = QLineEdit()
         self.model_input.setPlaceholderText("e.g., 87V, 34401A")
         info_layout.addRow("Model:", self.model_input)
@@ -182,13 +206,15 @@ class DUTTab(QWidget):
         self.description_input.setMaximumHeight(80)
         info_layout.addRow("Description:", self.description_input)
 
-        # Customer info (for reports)
+        # Customer info (for reports) - default to N/A
         self.customer_id_input = QLineEdit()
         self.customer_id_input.setPlaceholderText("Customer identifier")
+        self.customer_id_input.setText("N/A")
         info_layout.addRow("Customer ID:", self.customer_id_input)
 
         self.customer_serial_input = QLineEdit()
         self.customer_serial_input.setPlaceholderText("Customer's serial number (if different)")
+        self.customer_serial_input.setText("N/A")
         info_layout.addRow("Customer S/N:", self.customer_serial_input)
 
         self.details_tabs.addTab(info_tab, "Information")
@@ -289,6 +315,9 @@ class DUTTab(QWidget):
         # Manual override checkbox toggles asset input editability
         self.manual_asset_check.toggled.connect(self._on_manual_asset_toggled)
 
+        # Model autocomplete - when user selects from list, fill in fields
+        self.model_completer.activated.connect(self._on_model_selected_from_completer)
+
         # Remote capable checkbox toggles input method visibility
         self.remote_capable_check.toggled.connect(self._on_remote_capable_toggled)
 
@@ -301,6 +330,9 @@ class DUTTab(QWidget):
 
         # Initially hide input method if not remote capable
         self._on_remote_capable_toggled(False)
+
+        # Load models into autocomplete
+        self._load_device_models()
 
     def _load_procedures(self):
         """Load procedures into the procedure combo."""
@@ -369,13 +401,80 @@ class DUTTab(QWidget):
         except Exception as e:
             logger.error(f"Failed to load procedures: {e}")
 
+    def _load_device_models(self):
+        """Load device models into the autocomplete."""
+        self._model_data = {}  # Clear existing data
+
+        db = get_db()
+        if not db.is_connected:
+            return
+
+        try:
+            with db.session() as session:
+                models = session.query(DeviceModel).join(
+                    DeviceModel.manufacturer
+                ).order_by(
+                    DeviceModel.model_number
+                ).all()
+
+                completion_list = []
+                for model in models:
+                    make = model.manufacturer.name if model.manufacturer else "Unknown"
+                    # Display format: "789 - Fluke Processmeter" (model first for easy typing)
+                    label = f"{model.model_number} - {make}"
+                    if model.description:
+                        label += f" {model.description}"
+
+                    completion_list.append(label)
+                    # Store model data for lookup when selected
+                    self._model_data[label] = {
+                        "id": model.id,
+                        "make": make,
+                        "model": model.model_number,
+                        "description": model.description or "",
+                        "remote_capable": model.remote_capable or False,
+                    }
+
+                # Set up completer with the list
+                string_model = QStringListModel(completion_list)
+                self.model_completer.setModel(string_model)
+
+                logger.debug(f"Loaded {len(models)} device models into autocomplete")
+
+        except Exception as e:
+            logger.error(f"Failed to load device models: {e}")
+
+    def _on_model_selected_from_completer(self, text: str):
+        """Handle selection from model autocomplete."""
+        if text not in self._model_data:
+            return
+
+        model_info = self._model_data[text]
+
+        # Auto-fill the fields
+        self.make_input.setText(model_info["make"])
+        self.model_input.setText(model_info["model"])
+        self.description_input.setPlainText(model_info["description"])
+        self.remote_capable_check.setChecked(model_info["remote_capable"])
+
+        # Clear the search field after selection
+        self.model_search_input.clear()
+
+        # Update asset number
+        self._update_asset_number()
+
+        # Store the selected model ID for saving
+        self._selected_device_model_id = model_info["id"]
+
+        logger.debug(f"Selected model from autocomplete: {model_info['make']} {model_info['model']}")
+
     def _update_asset_number(self):
         """Auto-generate asset number from Model-SerialNumber."""
         if self.manual_asset_check.isChecked():
             return  # Don't auto-update if manual override is enabled
 
-        model = self.model_input.text().strip()
         serial = self.serial_input.text().strip()
+        model = self.model_input.text().strip()
 
         if model and serial:
             asset = f"{model}-{serial}"
@@ -597,16 +696,20 @@ class DUTTab(QWidget):
                     return
 
                 self._current_dut_id = dut.id
+                self._selected_device_model_id = dut.device_model_id  # Preserve model link if any
 
                 # Populate Information tab
                 self.manual_asset_check.setChecked(True)  # Enable editing
                 self.asset_input.setText(dut.asset_number)
+                self.model_search_input.clear()  # Clear search field
                 self.make_input.setText(dut.make or "")
                 self.model_input.setText(dut.model or "")
                 self.serial_input.setText(dut.serial_number or "")
                 self.description_input.setPlainText(dut.description or "")
-                self.customer_id_input.setText(dut.customer_id or "")
-                self.customer_serial_input.setText(dut.customer_serial or "")
+
+                # Customer fields - show N/A if empty
+                self.customer_id_input.setText(dut.customer_id or "N/A")
+                self.customer_serial_input.setText(dut.customer_serial or "N/A")
 
                 # Populate Capabilities tab
                 self.remote_capable_check.setChecked(dut.remote_capable or False)
@@ -661,15 +764,19 @@ class DUTTab(QWidget):
         """Add a new DUT - clears form for new entry."""
         logger.info("Adding new DUT")
         self._current_dut_id = None  # Mark as new DUT
+        self._selected_device_model_id = None  # No model selected yet
 
         # Clear all form fields
         self.asset_input.clear()
+        self.model_search_input.clear()
         self.make_input.clear()
         self.model_input.clear()
         self.serial_input.clear()
         self.description_input.clear()
-        self.customer_id_input.clear()
-        self.customer_serial_input.clear()
+
+        # Set customer fields to N/A by default
+        self.customer_id_input.setText("N/A")
+        self.customer_serial_input.setText("N/A")
 
         # Reset checkboxes and combos
         self.manual_asset_check.setChecked(False)
@@ -686,8 +793,8 @@ class DUTTab(QWidget):
         # Clear history table
         self.history_table.setRowCount(0)
 
-        # Focus on make field to start entry
-        self.make_input.setFocus()
+        # Focus on model search field to start entry
+        self.model_search_input.setFocus()
         self.details_tabs.setCurrentIndex(0)  # Show Information tab
 
     def _on_delete_dut(self):
@@ -732,6 +839,9 @@ class DUTTab(QWidget):
         asset = self.asset_input.text().strip()
         make = self.make_input.text().strip()
         model = self.model_input.text().strip()
+
+        # Get device_model_id if user selected from autocomplete
+        device_model_id = getattr(self, '_selected_device_model_id', None)
 
         if not asset:
             QMessageBox.warning(self, "Validation Error", "Asset number is required.")
@@ -794,6 +904,7 @@ class DUTTab(QWidget):
                 dut.asset_number = asset
                 dut.make = make
                 dut.model = model
+                dut.device_model_id = device_model_id  # Link to DeviceModel if using dropdown
                 dut.serial_number = self.serial_input.text().strip() or None
                 dut.description = self.description_input.toPlainText().strip() or None
                 dut.customer_id = self.customer_id_input.text().strip() or None

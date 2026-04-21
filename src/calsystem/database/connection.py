@@ -299,6 +299,14 @@ class DatabaseManager:
                         conn.execute(text("ALTER TABLE duts ADD COLUMN customer_serial VARCHAR(100)"))
                         conn.commit()
                         logger.info("Added customer_serial column to duts")
+
+                    # Model database tables (manufacturers, lab_codes, device_models)
+                    # These are created by create_all() but we check for device_model_id FK in duts
+                    if 'device_model_id' not in dut_columns:
+                        conn.execute(text("ALTER TABLE duts ADD COLUMN device_model_id INTEGER REFERENCES device_models(id)"))
+                        conn.commit()
+                        logger.info("Added device_model_id column to duts")
+
                 else:
                     # MySQL migrations
                     # Check is_active column
@@ -515,6 +523,17 @@ class DatabaseManager:
                         conn.execute(text("ALTER TABLE duts ADD COLUMN customer_serial VARCHAR(100)"))
                         conn.commit()
                         logger.info("Added customer_serial column to duts")
+
+                    # Model database tables - check device_model_id FK in duts
+                    result = conn.execute(text(
+                        "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                        "WHERE TABLE_NAME = 'duts' AND COLUMN_NAME = 'device_model_id'"
+                    ))
+                    if not result.fetchone():
+                        conn.execute(text("ALTER TABLE duts ADD COLUMN device_model_id INTEGER"))
+                        conn.commit()
+                        logger.info("Added device_model_id column to duts")
+
         except Exception as e:
             logger.warning(f"Migration check: {e}")
 

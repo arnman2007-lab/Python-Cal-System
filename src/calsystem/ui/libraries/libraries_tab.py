@@ -25,6 +25,8 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QDialog,
     QDialogButtonBox,
+    QCheckBox,
+    QInputDialog,
 )
 from PyQt6.QtCore import Qt, QTimer, QSize, QPropertyAnimation, QEasingCurve
 from PyQt6.QtGui import QPixmap, QImage
@@ -41,6 +43,9 @@ from calsystem.database.models import (
     SectionType,
     STANDARD_SECTION_TYPES,
     get_all_section_types,
+    Manufacturer,
+    LabCode,
+    DeviceModel,
 )
 
 
@@ -445,6 +450,324 @@ class SectionTypesDialog(QDialog):
             QMessageBox.critical(self, "Error", f"Failed to delete section type:\n{e}")
 
 
+class AddModelDialog(QDialog):
+    """Dialog for adding/editing a device model."""
+
+    def __init__(self, parent=None, model_id: int = None):
+        super().__init__(parent)
+        self._model_id = model_id
+        self._is_edit = model_id is not None
+        self.setWindowTitle("Edit Model" if self._is_edit else "Add New Model")
+        self.setMinimumWidth(400)
+        self._init_ui()
+        if self._is_edit:
+            self._load_model()
+
+    def _init_ui(self):
+        """Initialize the dialog UI."""
+        layout = QVBoxLayout(self)
+
+        form = QFormLayout()
+
+        # Manufacturer dropdown with add button
+        mfr_layout = QHBoxLayout()
+        self.manufacturer_combo = QComboBox()
+        self.manufacturer_combo.setMinimumWidth(200)
+        self._load_manufacturers()
+        mfr_layout.addWidget(self.manufacturer_combo)
+
+        self.add_mfr_btn = QPushButton("+")
+        self.add_mfr_btn.setFixedWidth(30)
+        self.add_mfr_btn.setToolTip("Add new manufacturer")
+        self.add_mfr_btn.clicked.connect(self._on_add_manufacturer)
+        mfr_layout.addWidget(self.add_mfr_btn)
+        form.addRow("Manufacturer:", mfr_layout)
+
+        # Model number
+        self.model_input = QLineEdit()
+        self.model_input.setPlaceholderText("e.g., 789, 87V, 34401A")
+        form.addRow("Model Number:", self.model_input)
+
+        # Description
+        self.description_input = QLineEdit()
+        self.description_input.setPlaceholderText("e.g., Processmeter, True RMS Multimeter")
+        form.addRow("Description:", self.description_input)
+
+        # Lab Code dropdown with add button
+        code_layout = QHBoxLayout()
+        self.lab_code_combo = QComboBox()
+        self.lab_code_combo.setMinimumWidth(200)
+        self._load_lab_codes()
+        code_layout.addWidget(self.lab_code_combo)
+
+        self.add_code_btn = QPushButton("+")
+        self.add_code_btn.setFixedWidth(30)
+        self.add_code_btn.setToolTip("Add new lab code")
+        self.add_code_btn.clicked.connect(self._on_add_lab_code)
+        code_layout.addWidget(self.add_code_btn)
+        form.addRow("Lab Code:", code_layout)
+
+        # Remote capable checkbox
+        self.remote_checkbox = QCheckBox("Remote Capable (can be automated via GPIB/USB)")
+        form.addRow("", self.remote_checkbox)
+
+        layout.addLayout(form)
+
+        # Buttons
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self._on_save)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _load_manufacturers(self):
+        """Load manufacturers into dropdown."""
+        self.manufacturer_combo.clear()
+        self.manufacturer_combo.addItem("-- Select Manufacturer --", None)
+
+        db = get_db()
+        if not db.is_connected:
+            return
+
+        try:
+            with db.session() as session:
+                manufacturers = session.query(Manufacturer).order_by(Manufacturer.name).all()
+                for mfr in manufacturers:
+                    self.manufacturer_combo.addItem(mfr.name, mfr.id)
+        except Exception as e:
+            logger.error(f"Failed to load manufacturers: {e}")
+
+    def _load_lab_codes(self):
+        """Load lab codes into dropdown."""
+        self.lab_code_combo.clear()
+        self.lab_code_combo.addItem("-- None --", None)
+
+        db = get_db()
+        if not db.is_connected:
+            return
+
+        try:
+            with db.session() as session:
+                codes = session.query(LabCode).order_by(LabCode.code).all()
+                for code in codes:
+                    display = f"{code.code} - {code.description}" if code.description else code.code
+                    self.lab_code_combo.addItem(display, code.id)
+        except Exception as e:
+            logger.error(f"Failed to load lab codes: {e}")
+
+    def _load_model(self):
+        """Load existing model for editing."""
+        db = get_db()
+        if not db.is_connected:
+            return
+
+        try:
+            with db.session() as session:
+                model = session.query(DeviceModel).filter(
+                    DeviceModel.id == self._model_id
+                ).first()
+
+                if model:
+                    # Set manufacturer
+                    idx = self.manufacturer_combo.findData(model.manufacturer_id)
+                    if idx >= 0:
+                        self.manufacturer_combo.setCurrentIndex(idx)
+
+                    self.model_input.setText(model.model_number)
+                    self.description_input.setText(model.description or "")
+
+                    # Set lab code
+                    if model.lab_code_id:
+                        idx = self.lab_code_combo.findData(model.lab_code_id)
+                        if idx >= 0:
+                            self.lab_code_combo.setCurrentIndex(idx)
+
+                    self.remote_checkbox.setChecked(model.remote_capable or False)
+
+        except Exception as e:
+            logger.error(f"Failed to load model: {e}")
+
+    def _on_add_manufacturer(self):
+        """Add a new manufacturer."""
+        name, ok = QInputDialog.getText(
+            self, "Add Manufacturer",
+            "Enter manufacturer name:",
+            QLineEdit.EchoMode.Normal
+        )
+
+        if not ok or not name.strip():
+            return
+
+        name = name.strip()
+
+        db = get_db()
+        if not db.is_connected:
+            return
+
+        try:
+            with db.session() as session:
+                # Check if already exists
+                existing = session.query(Manufacturer).filter(
+                    Manufacturer.name.ilike(name)
+                ).first()
+
+                if existing:
+                    QMessageBox.warning(self, "Duplicate", f"Manufacturer '{name}' already exists.")
+                    # Select it
+                    idx = self.manufacturer_combo.findData(existing.id)
+                    if idx >= 0:
+                        self.manufacturer_combo.setCurrentIndex(idx)
+                    return
+
+                # Add new
+                mfr = Manufacturer(name=name)
+                session.add(mfr)
+                session.commit()
+
+                # Reload and select new entry
+                self._load_manufacturers()
+                idx = self.manufacturer_combo.findData(mfr.id)
+                if idx >= 0:
+                    self.manufacturer_combo.setCurrentIndex(idx)
+
+                logger.info(f"Added manufacturer: {name}")
+
+        except Exception as e:
+            logger.error(f"Failed to add manufacturer: {e}")
+            QMessageBox.warning(self, "Error", f"Failed to add manufacturer: {e}")
+
+    def _on_add_lab_code(self):
+        """Add a new lab code."""
+        code, ok = QInputDialog.getText(
+            self, "Add Lab Code",
+            "Enter lab code (e.g., M, N, B):",
+            QLineEdit.EchoMode.Normal
+        )
+
+        if not ok or not code.strip():
+            return
+
+        code = code.strip().upper()
+
+        description, ok = QInputDialog.getText(
+            self, "Lab Code Description",
+            f"Enter description for code '{code}':",
+            QLineEdit.EchoMode.Normal
+        )
+
+        if not ok:
+            return
+
+        description = description.strip() if description else None
+
+        db = get_db()
+        if not db.is_connected:
+            return
+
+        try:
+            with db.session() as session:
+                # Check if already exists
+                existing = session.query(LabCode).filter(
+                    LabCode.code == code
+                ).first()
+
+                if existing:
+                    QMessageBox.warning(self, "Duplicate", f"Lab code '{code}' already exists.")
+                    # Select it
+                    idx = self.lab_code_combo.findData(existing.id)
+                    if idx >= 0:
+                        self.lab_code_combo.setCurrentIndex(idx)
+                    return
+
+                # Add new
+                lab_code = LabCode(code=code, description=description)
+                session.add(lab_code)
+                session.commit()
+
+                # Reload and select new entry
+                self._load_lab_codes()
+                idx = self.lab_code_combo.findData(lab_code.id)
+                if idx >= 0:
+                    self.lab_code_combo.setCurrentIndex(idx)
+
+                logger.info(f"Added lab code: {code}")
+
+        except Exception as e:
+            logger.error(f"Failed to add lab code: {e}")
+            QMessageBox.warning(self, "Error", f"Failed to add lab code: {e}")
+
+    def _on_save(self):
+        """Save the model."""
+        manufacturer_id = self.manufacturer_combo.currentData()
+        model_number = self.model_input.text().strip()
+        description = self.description_input.text().strip() or None
+        lab_code_id = self.lab_code_combo.currentData()
+        remote_capable = self.remote_checkbox.isChecked()
+
+        # Validation
+        if not manufacturer_id:
+            QMessageBox.warning(self, "Validation Error", "Please select a manufacturer.")
+            return
+
+        if not model_number:
+            QMessageBox.warning(self, "Validation Error", "Please enter a model number.")
+            return
+
+        db = get_db()
+        if not db.is_connected:
+            return
+
+        try:
+            with db.session() as session:
+                # Check for duplicate (different ID)
+                existing = session.query(DeviceModel).filter(
+                    DeviceModel.manufacturer_id == manufacturer_id,
+                    DeviceModel.model_number.ilike(model_number)
+                ).first()
+
+                if existing and (not self._is_edit or existing.id != self._model_id):
+                    mfr_name = self.manufacturer_combo.currentText()
+                    QMessageBox.warning(
+                        self, "Duplicate",
+                        f"Model '{mfr_name} {model_number}' already exists."
+                    )
+                    return
+
+                if self._is_edit:
+                    # Update existing
+                    model = session.query(DeviceModel).filter(
+                        DeviceModel.id == self._model_id
+                    ).first()
+
+                    if model:
+                        model.manufacturer_id = manufacturer_id
+                        model.model_number = model_number
+                        model.description = description
+                        model.lab_code_id = lab_code_id
+                        model.remote_capable = remote_capable
+                        session.commit()
+                        logger.info(f"Updated model: {model_number}")
+                else:
+                    # Create new
+                    model = DeviceModel(
+                        manufacturer_id=manufacturer_id,
+                        model_number=model_number,
+                        description=description,
+                        lab_code_id=lab_code_id,
+                        remote_capable=remote_capable,
+                    )
+                    session.add(model)
+                    session.commit()
+                    logger.info(f"Added model: {model_number}")
+
+                self.accept()
+
+        except Exception as e:
+            logger.error(f"Failed to save model: {e}")
+            QMessageBox.warning(self, "Error", f"Failed to save model: {e}")
+
+
 class LibrariesTab(QWidget):
     """Tab for managing wiring diagram libraries."""
 
@@ -458,12 +781,79 @@ class LibrariesTab(QWidget):
     def showEvent(self, event):
         """Called when tab becomes visible."""
         super().showEvent(event)
+        self._load_models()
+        self._load_manufacturers_filter()
         self._load_calibrators()
         self._load_duts()
 
     def _init_ui(self):
         """Initialize the UI."""
         layout = QVBoxLayout(self)
+
+        # =====================================================================
+        # Models Section
+        # =====================================================================
+        models_group = QGroupBox("Device Models")
+        models_group.setCheckable(True)
+        models_group.setChecked(True)
+        models_layout = QVBoxLayout(models_group)
+
+        # Models toolbar
+        models_toolbar = QHBoxLayout()
+
+        models_toolbar.addWidget(QLabel("Search:"))
+        self.model_search_input = QLineEdit()
+        self.model_search_input.setPlaceholderText("Search by model or manufacturer...")
+        self.model_search_input.setMaximumWidth(200)
+        self.model_search_input.textChanged.connect(self._filter_models_table)
+        models_toolbar.addWidget(self.model_search_input)
+
+        models_toolbar.addSpacing(10)
+
+        models_toolbar.addWidget(QLabel("Filter:"))
+        self.model_filter_combo = QComboBox()
+        self.model_filter_combo.addItem("All Manufacturers", None)
+        self.model_filter_combo.setMinimumWidth(150)
+        self.model_filter_combo.currentIndexChanged.connect(self._filter_models_table)
+        models_toolbar.addWidget(self.model_filter_combo)
+
+        models_toolbar.addStretch()
+
+        self.add_model_btn = QPushButton("+ Add Model")
+        self.add_model_btn.clicked.connect(self._on_add_model)
+        models_toolbar.addWidget(self.add_model_btn)
+
+        self.edit_model_btn = QPushButton("Edit")
+        self.edit_model_btn.clicked.connect(self._on_edit_model)
+        self.edit_model_btn.setEnabled(False)
+        models_toolbar.addWidget(self.edit_model_btn)
+
+        self.delete_model_btn = QPushButton("Delete")
+        self.delete_model_btn.clicked.connect(self._on_delete_model)
+        self.delete_model_btn.setEnabled(False)
+        models_toolbar.addWidget(self.delete_model_btn)
+
+        models_layout.addLayout(models_toolbar)
+
+        # Models table
+        self.models_table = QTableWidget()
+        self.models_table.setColumnCount(5)
+        self.models_table.setHorizontalHeaderLabels(["Make", "Model", "Description", "Lab Code", "Remote"])
+        self.models_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.models_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.models_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.models_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self.models_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        self.models_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.models_table.setMaximumHeight(200)
+        self.models_table.itemSelectionChanged.connect(self._on_model_selected)
+        models_layout.addWidget(self.models_table)
+
+        layout.addWidget(models_group)
+
+        # =====================================================================
+        # Wiring Diagram Library Section
+        # =====================================================================
 
         # Header
         header = QLabel("Wiring Diagram Library")
@@ -1326,3 +1716,177 @@ class LibrariesTab(QWidget):
             )
         else:
             QMessageBox.warning(self, "Error", "Failed to save settings.")
+
+    # =========================================================================
+    # Device Models Section
+    # =========================================================================
+
+    def _load_models(self):
+        """Load device models into the table."""
+        db = get_db()
+        if not db.is_connected:
+            return
+
+        try:
+            with db.session() as session:
+                models = session.query(DeviceModel).join(Manufacturer).order_by(
+                    Manufacturer.name, DeviceModel.model_number
+                ).all()
+
+                self._all_models = []  # Cache for filtering
+                for m in models:
+                    self._all_models.append({
+                        'id': m.id,
+                        'manufacturer': m.manufacturer.name,
+                        'manufacturer_id': m.manufacturer_id,
+                        'model_number': m.model_number,
+                        'description': m.description or '',
+                        'lab_code': m.lab_code.code if m.lab_code else '',
+                        'lab_code_desc': m.lab_code.description if m.lab_code else '',
+                        'remote_capable': m.remote_capable,
+                    })
+
+                self._populate_models_table(self._all_models)
+
+        except Exception as e:
+            logger.error(f"Failed to load models: {e}")
+
+    def _load_manufacturers_filter(self):
+        """Load manufacturers into the filter dropdown."""
+        db = get_db()
+        if not db.is_connected:
+            return
+
+        try:
+            # Remember current selection
+            current_data = self.model_filter_combo.currentData()
+
+            self.model_filter_combo.clear()
+            self.model_filter_combo.addItem("All Manufacturers", None)
+
+            with db.session() as session:
+                manufacturers = session.query(Manufacturer).order_by(Manufacturer.name).all()
+                for mfr in manufacturers:
+                    self.model_filter_combo.addItem(mfr.name, mfr.id)
+
+            # Restore selection if possible
+            if current_data:
+                idx = self.model_filter_combo.findData(current_data)
+                if idx >= 0:
+                    self.model_filter_combo.setCurrentIndex(idx)
+
+        except Exception as e:
+            logger.error(f"Failed to load manufacturers: {e}")
+
+    def _populate_models_table(self, models: list):
+        """Populate the models table with given model data."""
+        self.models_table.setRowCount(len(models))
+
+        for row, m in enumerate(models):
+            # Make
+            make_item = QTableWidgetItem(m['manufacturer'])
+            make_item.setData(Qt.ItemDataRole.UserRole, m['id'])
+            self.models_table.setItem(row, 0, make_item)
+
+            # Model
+            self.models_table.setItem(row, 1, QTableWidgetItem(m['model_number']))
+
+            # Description
+            self.models_table.setItem(row, 2, QTableWidgetItem(m['description']))
+
+            # Lab Code
+            lab_code_text = m['lab_code']
+            if m['lab_code_desc']:
+                lab_code_text = f"{m['lab_code']} - {m['lab_code_desc']}"
+            self.models_table.setItem(row, 3, QTableWidgetItem(lab_code_text))
+
+            # Remote
+            remote_item = QTableWidgetItem("Yes" if m['remote_capable'] else "")
+            remote_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.models_table.setItem(row, 4, remote_item)
+
+    def _filter_models_table(self):
+        """Filter models table based on search text and manufacturer filter."""
+        if not hasattr(self, '_all_models'):
+            return
+
+        search_text = self.model_search_input.text().lower()
+        manufacturer_id = self.model_filter_combo.currentData()
+
+        filtered = []
+        for m in self._all_models:
+            # Filter by manufacturer
+            if manufacturer_id and m['manufacturer_id'] != manufacturer_id:
+                continue
+
+            # Filter by search text
+            if search_text:
+                searchable = f"{m['manufacturer']} {m['model_number']} {m['description']}".lower()
+                if search_text not in searchable:
+                    continue
+
+            filtered.append(m)
+
+        self._populate_models_table(filtered)
+
+    def _on_model_selected(self):
+        """Handle model selection in table."""
+        selected = self.models_table.selectedItems()
+        has_selection = len(selected) > 0
+        self.edit_model_btn.setEnabled(has_selection)
+        self.delete_model_btn.setEnabled(has_selection)
+
+    def _on_add_model(self):
+        """Add a new device model."""
+        dialog = AddModelDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._load_models()
+            self._load_manufacturers_filter()
+
+    def _on_edit_model(self):
+        """Edit the selected device model."""
+        selected = self.models_table.selectedItems()
+        if not selected:
+            return
+
+        model_id = selected[0].data(Qt.ItemDataRole.UserRole)
+        dialog = AddModelDialog(self, model_id=model_id)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._load_models()
+            self._load_manufacturers_filter()
+
+    def _on_delete_model(self):
+        """Delete the selected device model."""
+        selected = self.models_table.selectedItems()
+        if not selected:
+            return
+
+        model_id = selected[0].data(Qt.ItemDataRole.UserRole)
+        model_name = f"{selected[0].text()} {self.models_table.item(selected[0].row(), 1).text()}"
+
+        reply = QMessageBox.question(
+            self,
+            "Confirm Delete",
+            f"Delete device model '{model_name}'?\n\n"
+            "This will not affect existing DUTs that reference this model.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        db = get_db()
+        if not db.is_connected:
+            return
+
+        try:
+            with db.session() as session:
+                model = session.query(DeviceModel).filter(DeviceModel.id == model_id).first()
+                if model:
+                    session.delete(model)
+                    session.commit()
+                    self._load_models()
+                    QMessageBox.information(self, "Deleted", f"Model '{model_name}' deleted.")
+        except Exception as e:
+            logger.error(f"Failed to delete model: {e}")
+            QMessageBox.warning(self, "Error", f"Failed to delete model: {e}")

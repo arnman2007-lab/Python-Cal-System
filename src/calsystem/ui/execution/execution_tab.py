@@ -50,6 +50,7 @@ from calsystem.database.models import (
     WorkstationConfig,
     DeviceGroupType,
     CommandBank,
+    DUTCommandBank,
     WiringDiagram,
     WiringDiagramLibrary,
     SectionDiagramLink,
@@ -57,6 +58,7 @@ from calsystem.database.models import (
 from calsystem.config.settings import get_settings
 from calsystem.ui.dialogs.calibrator_selection_dialog import CalibratorSelectionDialog
 from calsystem.instruments.visa_manager import get_visa_manager, PYVISA_AVAILABLE
+from calsystem.instruments.serial_manager import get_serial_manager, SerialConfig
 from calsystem.procedures import CSPFile, ProcedureData
 
 
@@ -487,6 +489,149 @@ class ManualReadingDialog(QDialog):
         return self._result
 
 
+class DUTStateMismatchDialog(QDialog):
+    """Dialog shown when DUT is not in the expected state."""
+
+    def __init__(
+        self,
+        command_name: str,
+        expected: str,
+        actual: str,
+        test_info: str,
+        parent=None
+    ):
+        super().__init__(parent)
+        self.setWindowTitle("DUT State Mismatch")
+        self.setModal(True)
+        self.setMinimumWidth(450)
+
+        self._should_recheck = False
+        self._continue_anyway = False
+
+        layout = QVBoxLayout(self)
+
+        # Test info header
+        info_label = QLabel(test_info)
+        info_label.setStyleSheet("font-weight: bold; font-size: 14px;")
+        info_label.setWordWrap(True)
+        layout.addWidget(info_label)
+
+        layout.addSpacing(10)
+
+        # Warning message
+        warning_frame = QFrame()
+        warning_frame.setFrameStyle(QFrame.Shape.Box | QFrame.Shadow.Sunken)
+        warning_frame.setStyleSheet("background-color: #fff3cd; border: 1px solid #ffc107;")
+        warning_layout = QVBoxLayout(warning_frame)
+
+        warning_label = QLabel("DUT is not in the expected state!")
+        warning_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #856404;")
+        warning_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        warning_layout.addWidget(warning_label)
+
+        layout.addWidget(warning_frame)
+        layout.addSpacing(10)
+
+        # State comparison
+        state_frame = QFrame()
+        state_frame.setFrameStyle(QFrame.Shape.Box | QFrame.Shadow.Sunken)
+        state_layout = QVBoxLayout(state_frame)
+
+        cmd_label = QLabel(f"Query: {command_name}")
+        cmd_label.setStyleSheet("color: gray;")
+        state_layout.addWidget(cmd_label)
+
+        expected_label = QLabel(f"Expected: {expected}")
+        expected_label.setStyleSheet("font-size: 14px; color: #28a745; font-weight: bold;")
+        state_layout.addWidget(expected_label)
+
+        actual_label = QLabel(f"Actual: {actual}")
+        actual_label.setStyleSheet("font-size: 14px; color: #dc3545; font-weight: bold;")
+        state_layout.addWidget(actual_label)
+
+        layout.addWidget(state_frame)
+        layout.addSpacing(10)
+
+        # Instructions
+        instructions = QLabel(
+            "Please adjust the DUT to the expected state,\n"
+            "then click 'Re-Check' to verify."
+        )
+        instructions.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        instructions.setStyleSheet("font-size: 12px;")
+        layout.addWidget(instructions)
+
+        layout.addSpacing(15)
+
+        # Buttons
+        button_layout = QHBoxLayout()
+
+        self.cancel_btn = QPushButton("Cancel Test")
+        self.cancel_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #6c757d;
+                color: white;
+                font-size: 14px;
+                padding: 10px 20px;
+                border-radius: 5px;
+            }
+            QPushButton:hover {
+                background-color: #5a6268;
+            }
+        """)
+        self.cancel_btn.clicked.connect(self.reject)
+        button_layout.addWidget(self.cancel_btn)
+
+        self.continue_btn = QPushButton("Continue Anyway")
+        self.continue_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #ffc107;
+                color: black;
+                font-size: 14px;
+                padding: 10px 20px;
+                border-radius: 5px;
+            }
+            QPushButton:hover {
+                background-color: #e0a800;
+            }
+        """)
+        self.continue_btn.clicked.connect(self._on_continue)
+        button_layout.addWidget(self.continue_btn)
+
+        self.recheck_btn = QPushButton("Re-Check")
+        self.recheck_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #007bff;
+                color: white;
+                font-size: 14px;
+                font-weight: bold;
+                padding: 10px 25px;
+                border-radius: 5px;
+            }
+            QPushButton:hover {
+                background-color: #0056b3;
+            }
+        """)
+        self.recheck_btn.clicked.connect(self._on_recheck)
+        button_layout.addWidget(self.recheck_btn)
+
+        layout.addLayout(button_layout)
+
+    def _on_recheck(self):
+        self._should_recheck = True
+        self.accept()
+
+    def _on_continue(self):
+        self._continue_anyway = True
+        self.accept()
+
+    def should_recheck(self) -> bool:
+        return self._should_recheck
+
+    def should_continue(self) -> bool:
+        return self._continue_anyway
+
+
 class ExecutionTab(QWidget):
     """Tab for executing calibration procedures."""
 
@@ -504,6 +649,11 @@ class ExecutionTab(QWidget):
         self._calibrator_commands: Optional[Dict[str, str]] = None
         # Reference DMM for automated measurements
         self._selected_dmm: Optional[Dict[str, Any]] = None
+        # DUT Remote Communication
+        self._dut_com_port: Optional[str] = None
+        self._dut_commands: Optional[Dict[str, Any]] = None
+        self._dut_serial_config: Optional[Dict[str, Any]] = None
+        self._dut_serial_connected: bool = False
         self._init_ui()
         self._connect_signals()
 
@@ -1177,6 +1327,278 @@ class ExecutionTab(QWidget):
         for key, value in self._calibrator_commands.items():
             if key.lower() == command_name.lower():
                 return value
+
+        return None
+
+    # =========================================================================
+    # DUT Remote Communication Methods
+    # =========================================================================
+
+    def _load_dut_commands(self):
+        """Load command bank for the current DUT's make/model."""
+        self._dut_commands = None
+        self._dut_serial_config = None
+        self._dut_com_port = None
+
+        if not self._current_dut_id:
+            return
+
+        db = get_db()
+        if not db.is_connected:
+            return
+
+        try:
+            with db.session() as session:
+                dut = session.query(DUT).filter(DUT.id == self._current_dut_id).first()
+                if not dut:
+                    return
+
+                # Get COM port from DUT
+                self._dut_com_port = dut.com_port
+
+                # Find command bank for this make/model
+                cmd_bank = session.query(DUTCommandBank).filter(
+                    DUTCommandBank.make.ilike(dut.make),
+                    DUTCommandBank.model.ilike(dut.model)
+                ).first()
+
+                if cmd_bank and cmd_bank.commands:
+                    self._dut_commands = cmd_bank.commands
+                    self._dut_serial_config = cmd_bank.serial_config
+                    cmd_list = list(self._dut_commands.keys())
+                    logger.info(f"Loaded DUT command bank for {dut.make} {dut.model}: {cmd_list}")
+                    self.status_display.append(f"DUT commands loaded: {', '.join(cmd_list)}")
+
+                    if self._dut_com_port:
+                        self.status_display.append(f"DUT COM port: {self._dut_com_port}")
+                    else:
+                        self.status_display.append("NOTE: No COM port assigned to DUT")
+                else:
+                    logger.info(f"No DUT command bank for {dut.make} {dut.model}")
+
+        except Exception as e:
+            logger.error(f"Failed to load DUT commands: {e}")
+
+    def _connect_dut_serial(self) -> bool:
+        """Connect to the DUT's serial port if not already connected."""
+        if not self._dut_com_port:
+            return False
+
+        serial_mgr = get_serial_manager()
+
+        if serial_mgr.is_connected(self._dut_com_port):
+            return True
+
+        # Build config from stored settings
+        config = SerialConfig()
+        if self._dut_serial_config:
+            config = SerialConfig.from_dict(self._dut_serial_config)
+
+        if serial_mgr.connect(self._dut_com_port, config):
+            self._dut_serial_connected = True
+            self.status_display.append(f"Connected to DUT on {self._dut_com_port}")
+            return True
+        else:
+            self.status_display.append(f"FAILED to connect to DUT on {self._dut_com_port}")
+            return False
+
+    def _disconnect_dut_serial(self):
+        """Disconnect from the DUT's serial port."""
+        if self._dut_com_port and self._dut_serial_connected:
+            serial_mgr = get_serial_manager()
+            serial_mgr.disconnect(self._dut_com_port)
+            self._dut_serial_connected = False
+
+    def _get_dut_command(self, command_name: str) -> Optional[Dict[str, Any]]:
+        """Get a command info dict from the DUT command bank."""
+        if not self._dut_commands:
+            return None
+
+        # Direct match
+        if command_name in self._dut_commands:
+            cmd_info = self._dut_commands[command_name]
+            if isinstance(cmd_info, dict):
+                return cmd_info
+            else:
+                return {"command": str(cmd_info), "delay_before": 0, "delay_after": 0.1}
+
+        # Case-insensitive match
+        for key, value in self._dut_commands.items():
+            if key.lower() == command_name.lower():
+                if isinstance(value, dict):
+                    return value
+                else:
+                    return {"command": str(value), "delay_before": 0, "delay_after": 0.1}
+
+        return None
+
+    def _query_dut(self, command_name: str) -> Optional[str]:
+        """Send a query command to the DUT and return the response."""
+        cmd_info = self._get_dut_command(command_name)
+        if not cmd_info:
+            logger.warning(f"DUT command not found: {command_name}")
+            return None
+
+        if not self._dut_com_port:
+            logger.warning("No COM port assigned to DUT")
+            return None
+
+        if not self._connect_dut_serial():
+            return None
+
+        serial_mgr = get_serial_manager()
+        command = cmd_info.get("command", "")
+        delay_before = cmd_info.get("delay_before", 0)
+        delay_after = cmd_info.get("delay_after", 0.1)
+
+        self.status_display.append(f"DUT Query: {command}")
+
+        success, response = serial_mgr.query(
+            self._dut_com_port,
+            command,
+            delay_before=delay_before,
+            delay_after=delay_after,
+        )
+
+        if success:
+            self.status_display.append(f"DUT Response: {response}")
+            return response
+        else:
+            self.status_display.append("DUT Query failed - no response")
+            return None
+
+    def _send_dut_command(self, command_name: str) -> bool:
+        """Send a command to the DUT (no response expected)."""
+        cmd_info = self._get_dut_command(command_name)
+        if not cmd_info:
+            logger.warning(f"DUT command not found: {command_name}")
+            return False
+
+        if not self._dut_com_port:
+            return False
+
+        if not self._connect_dut_serial():
+            return False
+
+        serial_mgr = get_serial_manager()
+        command = cmd_info.get("command", "")
+        delay_after = cmd_info.get("delay_after", 0.1)
+
+        self.status_display.append(f"DUT Command: {command}")
+
+        return serial_mgr.write(self._dut_com_port, command, delay_after=delay_after)
+
+    def _execute_dut_precheck(self, tp: Dict[str, Any]) -> bool:
+        """
+        Execute DUT pre-check before calibrator output.
+
+        Returns True if OK to proceed, False if cancelled.
+        """
+        precheck_cmd = tp.get('dut_pre_check_command')
+        expected = tp.get('dut_pre_check_expected')
+
+        if not precheck_cmd or not expected:
+            return True  # No pre-check configured
+
+        if not self._dut_commands or not self._dut_com_port:
+            # No DUT remote configured, skip pre-check
+            return True
+
+        # Get test info for dialog
+        nominal = tp.get('nominal_value', '')
+        unit = tp.get('unit', '')
+        test_info = f"Test Point: {nominal} {unit}"
+
+        while True:
+            # Query DUT
+            response = self._query_dut(precheck_cmd)
+
+            if response is None:
+                # Query failed - ask if user wants to continue
+                reply = QMessageBox.question(
+                    self,
+                    "DUT Query Failed",
+                    f"Failed to query DUT state ({precheck_cmd}).\n\n"
+                    "Continue without pre-check?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                )
+                return reply == QMessageBox.StandardButton.Yes
+
+            # Check if response matches expected
+            response_clean = response.strip()
+            expected_clean = expected.strip()
+
+            # Try numeric comparison if both are numbers
+            try:
+                if float(response_clean) == float(expected_clean):
+                    self.status_display.append(f"DUT state OK: {response_clean} == {expected_clean}")
+                    return True
+            except ValueError:
+                pass
+
+            # String comparison (case-insensitive)
+            if response_clean.lower() == expected_clean.lower():
+                self.status_display.append(f"DUT state OK: {response_clean}")
+                return True
+
+            # State mismatch - show dialog
+            dialog = DUTStateMismatchDialog(
+                command_name=precheck_cmd,
+                expected=expected,
+                actual=response_clean,
+                test_info=test_info,
+                parent=self,
+            )
+
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                # User cancelled
+                self.status_display.append("Pre-check cancelled by user")
+                return False
+
+            if dialog.should_continue():
+                # User chose to continue anyway
+                self.status_display.append(f"Pre-check bypassed (actual: {response_clean})")
+                return True
+
+            # User clicked Re-Check - loop will query again
+
+    def _execute_dut_postread(self, tp: Dict[str, Any]) -> Optional[float]:
+        """
+        Execute DUT post-read to capture measurement value.
+
+        Returns the reading if successful, None otherwise.
+        """
+        postread_cmd = tp.get('dut_post_read_command')
+        if not postread_cmd:
+            return None  # No post-read configured
+
+        if not self._dut_commands or not self._dut_com_port:
+            return None
+
+        # Query DUT for reading
+        response = self._query_dut(postread_cmd)
+        if response is None:
+            return None
+
+        # Parse response based on parser type
+        parser = tp.get('dut_post_read_parser', 'numeric')
+
+        try:
+            if parser == 'numeric':
+                # Extract first number from response
+                import re
+                match = re.search(r'-?\d+\.?\d*', response)
+                if match:
+                    return float(match.group())
+            elif parser == 'string':
+                # Return raw string (caller handles conversion)
+                return response
+            else:
+                # Default to float conversion
+                return float(response.strip())
+        except (ValueError, AttributeError) as e:
+            logger.warning(f"Failed to parse DUT response '{response}': {e}")
+            self.status_display.append(f"Could not parse DUT response: {response}")
 
         return None
 
@@ -1941,6 +2363,9 @@ class ExecutionTab(QWidget):
                 cal_info = f"{self._selected_calibrator['make']} {self._selected_calibrator['model']}"
                 self.status_display.append(f"Calibrator: {cal_info}")
                 self.status_display.append(f"Address: {self._get_calibrator_address()}")
+
+            # Load DUT commands for remote communication
+            self._load_dut_commands()
 
             # Load test points and start execution
             self._load_test_points()
@@ -2916,6 +3341,12 @@ class ExecutionTab(QWidget):
         """Send output command to calibrator for the test point."""
         test_type = tp.get('test_type', 'measurement')
 
+        # DUT Pre-Check: Verify DUT is in expected state before calibrator output
+        if tp.get('dut_pre_check_command') and tp.get('dut_pre_check_expected'):
+            if not self._execute_dut_precheck(tp):
+                # User cancelled or pre-check failed
+                return
+
         # For Pass/Fail tests, check if we need to do pre-conditioning first
         if test_type == 'pass_fail':
             # Execute pre-conditioning if defined and we have a calibrator
@@ -3001,6 +3432,16 @@ class ExecutionTab(QWidget):
 
         if self._send_calibrator_commands(final_cmd, operate_cmd):
             self.status_display.append("Output set - ready for reading")
+
+            # DUT Post-Read: Automatically capture reading from DUT if configured
+            if tp.get('dut_post_read_command'):
+                # Small delay to let DUT settle
+                time.sleep(0.3)
+                dut_reading = self._execute_dut_postread(tp)
+                if dut_reading is not None:
+                    # Auto-populate the reading input field
+                    self.reading_input.setText(str(dut_reading))
+                    self.status_display.append(f"DUT Reading captured: {dut_reading}")
         else:
             self.status_display.append("WARNING: Calibrator command failed!")
 
@@ -4256,6 +4697,9 @@ class ExecutionTab(QWidget):
                                 dut.next_due_date = datetime.now() + timedelta(days=dut.calibration_interval_days)
 
                     logger.info(f"Session {self._current_session_id} completed: {overall_result}")
+
+            # Disconnect DUT serial if connected
+            self._disconnect_dut_serial()
 
         except Exception as e:
             logger.error(f"Failed to complete session: {e}")

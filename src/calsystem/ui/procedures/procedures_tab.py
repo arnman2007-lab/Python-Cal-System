@@ -46,7 +46,8 @@ from calsystem.database.connection import get_db
 from calsystem.database.models import (
     Procedure, TestSection, TestPoint, CommandBank, ToleranceType, WiringDiagram,
     Standard, WorkstationStandard, WorkstationConfig, DeviceGroupType,
-    WiringDiagramLibrary, SectionDiagramLink, STANDARD_SECTION_TYPES, get_all_section_types
+    WiringDiagramLibrary, SectionDiagramLink, STANDARD_SECTION_TYPES, get_all_section_types,
+    DeviceModel,
 )
 from calsystem.config.settings import get_settings
 from calsystem.procedures import export_procedure_to_csp
@@ -401,6 +402,59 @@ class ProceduresTab(QWidget):
         super().showEvent(event)
         self._refresh_procedure_list()
         self._load_wiring_diagram_types()
+        self._load_target_models()
+
+    def _load_target_models(self):
+        """Load device models into the target model dropdown."""
+        current_data = self.target_model_dropdown.currentData()
+        self.target_model_dropdown.clear()
+        self.target_model_dropdown.addItem("(Custom - use text fields)", None)
+
+        db = get_db()
+        if not db.is_connected:
+            return
+
+        try:
+            with db.session() as session:
+                models = session.query(DeviceModel).join(
+                    DeviceModel.manufacturer
+                ).order_by(
+                    DeviceModel.manufacturer.has(),
+                    DeviceModel.model_number
+                ).all()
+
+                for model in models:
+                    make = model.manufacturer.name if model.manufacturer else "Unknown"
+                    label = f"{make} {model.model_number}"
+                    if model.description:
+                        label += f" - {model.description}"
+                    # Store both id and make/model for easy access
+                    self.target_model_dropdown.addItem(
+                        label,
+                        {"id": model.id, "make": make, "model": model.model_number}
+                    )
+
+                # Restore selection if valid
+                if current_data:
+                    for i in range(self.target_model_dropdown.count()):
+                        item_data = self.target_model_dropdown.itemData(i)
+                        if item_data and isinstance(item_data, dict) and item_data.get("id") == current_data.get("id"):
+                            self.target_model_dropdown.setCurrentIndex(i)
+                            break
+
+                logger.debug(f"Loaded {len(models)} device models into target dropdown")
+
+        except Exception as e:
+            logger.error(f"Failed to load target device models: {e}")
+
+    def _on_target_model_changed(self, index: int):
+        """Handle target model dropdown selection change."""
+        data = self.target_model_dropdown.currentData()
+        if data and isinstance(data, dict):
+            # Auto-fill make/model text fields from dropdown selection
+            self.target_make_input.setText(data.get("make", ""))
+            self.target_model_input.setText(data.get("model", ""))
+        # If "(Custom - use text fields)" is selected, leave text fields editable
 
     def _init_ui(self):
         """Initialize the UI."""
@@ -472,12 +526,21 @@ class ProceduresTab(QWidget):
         self.name_input = QLineEdit()
         info_layout.addRow("Name:", self.name_input)
 
+        # Target model dropdown with fallback to free-text
         target_layout = QHBoxLayout()
+        self.target_model_dropdown = QComboBox()
+        self.target_model_dropdown.setMinimumWidth(200)
+        self.target_model_dropdown.currentIndexChanged.connect(self._on_target_model_changed)
+        target_layout.addWidget(self.target_model_dropdown)
+
+        # Free-text inputs for custom make/model (or when dropdown not used)
         self.target_make_input = QLineEdit()
         self.target_make_input.setPlaceholderText("Make")
+        self.target_make_input.setMaximumWidth(120)
         target_layout.addWidget(self.target_make_input)
         self.target_model_input = QLineEdit()
         self.target_model_input.setPlaceholderText("Model")
+        self.target_model_input.setMaximumWidth(120)
         target_layout.addWidget(self.target_model_input)
         info_layout.addRow("Target:", target_layout)
 
@@ -1688,6 +1751,100 @@ class ProceduresTab(QWidget):
 
         self.details_tabs.addTab(adv_widget, "Advanced")
 
+        # === DUT Remote Tab ===
+        dut_remote_widget = QWidget()
+        dut_remote_layout = QFormLayout(dut_remote_widget)
+        dut_remote_layout.setSpacing(8)
+
+        # Header
+        dut_remote_header = QLabel("DUT Remote Communication")
+        dut_remote_header.setStyleSheet("font-weight: bold; font-size: 12px;")
+        dut_remote_layout.addRow(dut_remote_header)
+
+        dut_remote_info = QLabel(
+            "Configure commands to query DUT state before calibrator output\n"
+            "and capture readings after calibrator output."
+        )
+        dut_remote_info.setStyleSheet("color: gray; font-size: 10px;")
+        dut_remote_info.setWordWrap(True)
+        dut_remote_layout.addRow(dut_remote_info)
+
+        dut_remote_layout.addRow(QLabel(""))  # Spacer
+
+        # Pre-Check Section
+        precheck_label = QLabel("Pre-Check (verify DUT state before output):")
+        precheck_label.setStyleSheet("font-weight: bold;")
+        dut_remote_layout.addRow(precheck_label)
+
+        self.dut_precheck_cmd_combo = QComboBox()
+        self.dut_precheck_cmd_combo.setEditable(True)
+        self.dut_precheck_cmd_combo.addItem("")
+        self.dut_precheck_cmd_combo.addItems([
+            "Query Position",
+            "Query Range",
+            "Query Mode",
+            "Query Function",
+            "Query Buttons",
+        ])
+        self.dut_precheck_cmd_combo.setToolTip(
+            "Command name from DUT command bank to query state"
+        )
+        dut_remote_layout.addRow("Command:", self.dut_precheck_cmd_combo)
+
+        self.dut_precheck_expected_input = QLineEdit()
+        self.dut_precheck_expected_input.setPlaceholderText(
+            "e.g., '4' for DC Volts position on Fluke 789"
+        )
+        self.dut_precheck_expected_input.setToolTip(
+            "Expected response from DUT. If mismatch, tech is prompted to adjust."
+        )
+        dut_remote_layout.addRow("Expected:", self.dut_precheck_expected_input)
+
+        dut_remote_layout.addRow(QLabel(""))  # Spacer
+
+        # Post-Read Section
+        postread_label = QLabel("Post-Read (capture reading after output):")
+        postread_label.setStyleSheet("font-weight: bold;")
+        dut_remote_layout.addRow(postread_label)
+
+        self.dut_postread_cmd_combo = QComboBox()
+        self.dut_postread_cmd_combo.setEditable(True)
+        self.dut_postread_cmd_combo.addItem("")
+        self.dut_postread_cmd_combo.addItems([
+            "Read Value",
+            "Trigger Read",
+        ])
+        self.dut_postread_cmd_combo.setToolTip(
+            "Command name from DUT command bank to capture reading"
+        )
+        dut_remote_layout.addRow("Command:", self.dut_postread_cmd_combo)
+
+        self.dut_postread_parser_combo = QComboBox()
+        self.dut_postread_parser_combo.addItems([
+            "numeric",
+            "string",
+        ])
+        self.dut_postread_parser_combo.setToolTip(
+            "How to parse the DUT response:\n"
+            "- numeric: Extract first number from response\n"
+            "- string: Use raw response"
+        )
+        dut_remote_layout.addRow("Parser:", self.dut_postread_parser_combo)
+
+        dut_remote_layout.addRow(QLabel(""))  # Spacer
+
+        # Note about command bank
+        note_label = QLabel(
+            "Note: Commands must be defined in the DUT's command bank\n"
+            "(Remote tab → DUT Command Banks)"
+        )
+        note_label.setStyleSheet("color: #666; font-style: italic; font-size: 10px;")
+        note_label.setWordWrap(True)
+        dut_remote_layout.addRow(note_label)
+
+        self.details_tabs.addTab(dut_remote_widget, "DUT Remote")
+        self._dut_remote_tab_index = self.details_tabs.count() - 1
+
     def _on_test_type_changed(self, index: int):
         """Show/hide tabs based on selected test type."""
         # Tab visibility matrix:
@@ -1721,6 +1878,7 @@ class ProceduresTab(QWidget):
         logger.info("Creating new procedure")
         self._current_procedure_id = None
         self.name_input.clear()
+        self.target_model_dropdown.setCurrentIndex(0)  # Reset to "(Custom - use text fields)"
         self.target_make_input.clear()
         self.target_model_input.clear()
         self.structure_tree.clear()
@@ -1771,6 +1929,11 @@ class ProceduresTab(QWidget):
         self.formula_input.clear()
         # DMM config
         self._clear_dmm_config()
+        # DUT Remote
+        self.dut_precheck_cmd_combo.setCurrentIndex(0)
+        self.dut_precheck_expected_input.clear()
+        self.dut_postread_cmd_combo.setCurrentIndex(0)
+        self.dut_postread_parser_combo.setCurrentIndex(0)
 
     def _on_measurement_target_changed(self, text: str):
         """Show/hide custom expected value fields based on measurement target selection."""
@@ -2179,8 +2342,27 @@ class ProceduresTab(QWidget):
 
                 self._current_procedure_id = proc_id
                 self.name_input.setText(procedure.name)
-                self.target_make_input.setText(procedure.target_make or "")
-                self.target_model_input.setText(procedure.target_model or "")
+
+                # Try to match target make/model to a DeviceModel in dropdown
+                target_make = procedure.target_make or ""
+                target_model = procedure.target_model or ""
+                matched = False
+
+                for i in range(self.target_model_dropdown.count()):
+                    item_data = self.target_model_dropdown.itemData(i)
+                    if item_data and isinstance(item_data, dict):
+                        if (item_data.get("make", "").lower() == target_make.lower() and
+                                item_data.get("model", "").lower() == target_model.lower()):
+                            self.target_model_dropdown.setCurrentIndex(i)
+                            matched = True
+                            break
+
+                if not matched:
+                    # No match found, use custom text fields
+                    self.target_model_dropdown.setCurrentIndex(0)
+
+                self.target_make_input.setText(target_make)
+                self.target_model_input.setText(target_model)
 
                 # Clean up any corrupted section names (with accumulated [type] suffixes)
                 sections_cleaned = False
@@ -3205,6 +3387,34 @@ class ProceduresTab(QWidget):
                 # DMM configuration
                 self._load_dmm_config(tp.dmm_config)
 
+                # DUT Remote configuration
+                if tp.dut_pre_check_command:
+                    idx = self.dut_precheck_cmd_combo.findText(tp.dut_pre_check_command)
+                    if idx >= 0:
+                        self.dut_precheck_cmd_combo.setCurrentIndex(idx)
+                    else:
+                        self.dut_precheck_cmd_combo.setCurrentText(tp.dut_pre_check_command)
+                else:
+                    self.dut_precheck_cmd_combo.setCurrentIndex(0)
+
+                self.dut_precheck_expected_input.setText(tp.dut_pre_check_expected or "")
+
+                if tp.dut_post_read_command:
+                    idx = self.dut_postread_cmd_combo.findText(tp.dut_post_read_command)
+                    if idx >= 0:
+                        self.dut_postread_cmd_combo.setCurrentIndex(idx)
+                    else:
+                        self.dut_postread_cmd_combo.setCurrentText(tp.dut_post_read_command)
+                else:
+                    self.dut_postread_cmd_combo.setCurrentIndex(0)
+
+                if tp.dut_post_read_parser:
+                    idx = self.dut_postread_parser_combo.findText(tp.dut_post_read_parser)
+                    if idx >= 0:
+                        self.dut_postread_parser_combo.setCurrentIndex(idx)
+                else:
+                    self.dut_postread_parser_combo.setCurrentIndex(0)
+
                 logger.debug(f"Loaded test point: {tp_id}")
 
         except Exception as e:
@@ -3384,6 +3594,16 @@ class ProceduresTab(QWidget):
                     tp.dmm_config = self._save_dmm_config()
                 else:
                     tp.dmm_config = None
+
+                # DUT Remote configuration
+                precheck_cmd = self.dut_precheck_cmd_combo.currentText().strip()
+                tp.dut_pre_check_command = precheck_cmd if precheck_cmd else None
+                precheck_expected = self.dut_precheck_expected_input.text().strip()
+                tp.dut_pre_check_expected = precheck_expected if precheck_expected else None
+                postread_cmd = self.dut_postread_cmd_combo.currentText().strip()
+                tp.dut_post_read_command = postread_cmd if postread_cmd else None
+                postread_parser = self.dut_postread_parser_combo.currentText().strip()
+                tp.dut_post_read_parser = postread_parser if postread_parser else None
 
                 # Update tree display - for Pass/Fail show operational check, for others show nominal
                 if tp.test_type.value == "pass_fail":
