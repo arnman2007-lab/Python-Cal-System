@@ -498,6 +498,7 @@ class DUTStateMismatchDialog(QDialog):
         expected: str,
         actual: str,
         test_info: str,
+        prompt: Optional[str] = None,
         parent=None
     ):
         super().__init__(parent)
@@ -552,13 +553,18 @@ class DUTStateMismatchDialog(QDialog):
         layout.addWidget(state_frame)
         layout.addSpacing(10)
 
-        # Instructions
-        instructions = QLabel(
-            "Please adjust the DUT to the expected state,\n"
-            "then click 'Re-Check' to verify."
-        )
+        # Instructions - use custom prompt if provided
+        if prompt:
+            instruction_text = f"{prompt}\n\nThen click 'Re-Check' to verify."
+        else:
+            instruction_text = (
+                "Please adjust the DUT to the expected state,\n"
+                "then click 'Re-Check' to verify."
+            )
+        instructions = QLabel(instruction_text)
         instructions.setAlignment(Qt.AlignmentFlag.AlignCenter)
         instructions.setStyleSheet("font-size: 12px;")
+        instructions.setWordWrap(True)
         layout.addWidget(instructions)
 
         layout.addSpacing(15)
@@ -1552,6 +1558,7 @@ class ExecutionTab(QWidget):
         precheck_cmd = tp.get('dut_pre_check_command')
         precheck_param = tp.get('dut_pre_check_param')  # Parameter for {value} substitution
         expected = tp.get('dut_pre_check_expected')
+        precheck_prompt = tp.get('dut_pre_check_prompt')  # Custom message for tech if mismatch
 
         if not precheck_cmd or not expected:
             return True  # No pre-check configured
@@ -1603,6 +1610,7 @@ class ExecutionTab(QWidget):
                 expected=expected,
                 actual=response_clean,
                 test_info=test_info,
+                prompt=precheck_prompt,
                 parent=self,
             )
 

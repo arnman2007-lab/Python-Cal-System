@@ -2142,6 +2142,16 @@ class ProceduresTab(QWidget):
         )
         dut_remote_layout.addRow("Expected:", self.dut_precheck_expected_input)
 
+        self.dut_precheck_prompt_input = QLineEdit()
+        self.dut_precheck_prompt_input.setPlaceholderText(
+            "e.g., 'Turn knob to DC Volts position'"
+        )
+        self.dut_precheck_prompt_input.setToolTip(
+            "Custom message shown to tech if DUT state doesn't match expected.\n"
+            "Example: 'Turn the rotary switch to the DC V position'"
+        )
+        dut_remote_layout.addRow("Prompt:", self.dut_precheck_prompt_input)
+
         dut_remote_layout.addRow(QLabel(""))  # Spacer
 
         # Post-Read Section
@@ -2272,6 +2282,7 @@ class ProceduresTab(QWidget):
         self.dut_precheck_cmd_combo.currentTextChanged.connect(self._update_flow_preview)
         self.dut_precheck_param_input.textChanged.connect(self._update_flow_preview)
         self.dut_precheck_expected_input.textChanged.connect(self._update_flow_preview)
+        self.dut_precheck_prompt_input.textChanged.connect(self._update_flow_preview)
         self.dut_postread_cmd_combo.currentTextChanged.connect(self._update_flow_preview)
         self.dut_postread_param_input.textChanged.connect(self._update_flow_preview)
         self.dut_postread_parser_combo.currentTextChanged.connect(self._update_flow_preview)
@@ -2367,6 +2378,7 @@ class ProceduresTab(QWidget):
         self.dut_precheck_cmd_combo.setCurrentIndex(0)
         self.dut_precheck_param_input.clear()
         self.dut_precheck_expected_input.clear()
+        self.dut_precheck_prompt_input.clear()
         self.dut_postread_cmd_combo.setCurrentIndex(0)
         self.dut_postread_param_input.clear()
         self.dut_postread_parser_combo.setCurrentIndex(0)
@@ -2448,6 +2460,7 @@ class ProceduresTab(QWidget):
             "dut_pre_check_command": self.dut_precheck_cmd_combo.currentText() or None,
             "dut_pre_check_param": self.dut_precheck_param_input.text() or None,
             "dut_pre_check_expected": self.dut_precheck_expected_input.text() or None,
+            "dut_pre_check_prompt": self.dut_precheck_prompt_input.text() or None,
             "dut_post_read_command": self.dut_postread_cmd_combo.currentText() or None,
             "dut_post_read_param": self.dut_postread_param_input.text() or None,
             "dut_post_read_parser": self.dut_postread_parser_combo.currentText() or None,
@@ -3933,6 +3946,7 @@ class ProceduresTab(QWidget):
 
                 self.dut_precheck_param_input.setText(tp.dut_pre_check_param or "")
                 self.dut_precheck_expected_input.setText(tp.dut_pre_check_expected or "")
+                self.dut_precheck_prompt_input.setText(tp.dut_pre_check_prompt or "")
 
                 if tp.dut_post_read_command:
                     idx = self.dut_postread_cmd_combo.findText(tp.dut_post_read_command)
@@ -4154,6 +4168,8 @@ class ProceduresTab(QWidget):
                 tp.dut_pre_check_param = precheck_param if precheck_param else None
                 precheck_expected = self.dut_precheck_expected_input.text().strip()
                 tp.dut_pre_check_expected = precheck_expected if precheck_expected else None
+                precheck_prompt = self.dut_precheck_prompt_input.text().strip()
+                tp.dut_pre_check_prompt = precheck_prompt if precheck_prompt else None
                 postread_cmd = self.dut_postread_cmd_combo.currentText().strip()
                 tp.dut_post_read_command = postread_cmd if postread_cmd else None
                 postread_param = self.dut_postread_param_input.text().strip()

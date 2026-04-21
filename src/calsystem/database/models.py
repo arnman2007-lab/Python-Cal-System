@@ -568,6 +568,7 @@ class TestPoint(Base):
     dut_pre_check_command = Column(String(50), nullable=True, comment="DUT command ref for pre-check (e.g., Query Position)")
     dut_pre_check_param = Column(String(100), nullable=True, comment="Parameter value to substitute into pre-check command {value}")
     dut_pre_check_expected = Column(String(100), nullable=True, comment="Expected response pattern/value")
+    dut_pre_check_prompt = Column(String(255), nullable=True, comment="Custom message to show tech if state mismatch (e.g., Turn knob to DC Volts)")
     # Post-read - read measurement from DUT after calibrator output
     dut_post_read_command = Column(String(50), nullable=True, comment="DUT command ref for post-read (e.g., Read Value)")
     dut_post_read_param = Column(String(100), nullable=True, comment="Parameter value to substitute into post-read command {value}")
