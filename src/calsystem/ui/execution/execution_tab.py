@@ -506,9 +506,6 @@ class DUTStateMismatchDialog(QDialog):
         self.setModal(True)
         self.setMinimumWidth(450)
 
-        self._should_recheck = False
-        self._continue_anyway = False
-
         layout = QVBoxLayout(self)
 
         # Test info header
@@ -569,73 +566,47 @@ class DUTStateMismatchDialog(QDialog):
 
         layout.addSpacing(15)
 
-        # Buttons
+        # Buttons - only Cancel and Continue (which triggers recheck)
         button_layout = QHBoxLayout()
 
         self.cancel_btn = QPushButton("Cancel Test")
         self.cancel_btn.setStyleSheet("""
             QPushButton {
-                background-color: #6c757d;
+                background-color: #dc3545;
                 color: white;
                 font-size: 14px;
                 padding: 10px 20px;
                 border-radius: 5px;
             }
             QPushButton:hover {
-                background-color: #5a6268;
+                background-color: #c82333;
             }
         """)
         self.cancel_btn.clicked.connect(self.reject)
         button_layout.addWidget(self.cancel_btn)
 
-        self.continue_btn = QPushButton("Continue Anyway")
+        # Spacer to push Continue button to the right
+        button_layout.addStretch()
+
+        self.continue_btn = QPushButton("Continue")
         self.continue_btn.setStyleSheet("""
             QPushButton {
-                background-color: #ffc107;
-                color: black;
-                font-size: 14px;
-                padding: 10px 20px;
-                border-radius: 5px;
-            }
-            QPushButton:hover {
-                background-color: #e0a800;
-            }
-        """)
-        self.continue_btn.clicked.connect(self._on_continue)
-        button_layout.addWidget(self.continue_btn)
-
-        self.recheck_btn = QPushButton("Re-Check")
-        self.recheck_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #007bff;
+                background-color: #28a745;
                 color: white;
                 font-size: 14px;
                 font-weight: bold;
-                padding: 10px 25px;
+                padding: 10px 30px;
                 border-radius: 5px;
             }
             QPushButton:hover {
-                background-color: #0056b3;
+                background-color: #218838;
             }
         """)
-        self.recheck_btn.clicked.connect(self._on_recheck)
-        button_layout.addWidget(self.recheck_btn)
+        self.continue_btn.setToolTip("Click after adjusting DUT - will verify the state")
+        self.continue_btn.clicked.connect(self.accept)
+        button_layout.addWidget(self.continue_btn)
 
         layout.addLayout(button_layout)
-
-    def _on_recheck(self):
-        self._should_recheck = True
-        self.accept()
-
-    def _on_continue(self):
-        self._continue_anyway = True
-        self.accept()
-
-    def should_recheck(self) -> bool:
-        return self._should_recheck
-
-    def should_continue(self) -> bool:
-        return self._continue_anyway
 
 
 class ExecutionTab(QWidget):
@@ -1619,12 +1590,8 @@ class ExecutionTab(QWidget):
                 self.status_display.append("Pre-check cancelled by user")
                 return False
 
-            if dialog.should_continue():
-                # User chose to continue anyway
-                self.status_display.append(f"Pre-check bypassed (actual: {response_clean})")
-                return True
-
-            # User clicked Re-Check - loop will query again
+            # User clicked Continue - loop back and recheck DUT state
+            self.status_display.append("Rechecking DUT state...")
 
     def _execute_dut_postread(self, tp: Dict[str, Any]) -> Optional[float]:
         """
