@@ -24,6 +24,7 @@ from PyQt6.QtWidgets import (
     QTextEdit,
     QAbstractItemView,
     QCompleter,
+    QListView,
 )
 from PyQt6.QtCore import Qt, QTimer, QStringListModel
 from PyQt6.QtGui import QColor
@@ -238,17 +239,16 @@ class RemoteTab(QWidget):
         self.bank_model_search.setPlaceholderText("Type model number to search (e.g., 789, 87V)...")
         self.bank_model_search.setToolTip("Start typing a model number to see matching devices from the library")
 
-        # Autocomplete setup
+        # Autocomplete setup - matches DUT tab pattern
         self._bank_model_data = {}  # Maps display string to model info dict
         self._bank_model_completer = QCompleter()
         self._bank_model_completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
         self._bank_model_completer.setFilterMode(Qt.MatchFlag.MatchContains)
         self._bank_model_completer.setMaxVisibleItems(10)
-        # Use popup to show full text
-        from PyQt6.QtWidgets import QListView
-        popup = QListView()
-        popup.setMinimumWidth(300)
-        self._bank_model_completer.setPopup(popup)
+        # Use popup to show full text (store as instance var to prevent GC)
+        self._bank_popup = QListView()
+        self._bank_popup.setMinimumWidth(350)
+        self._bank_model_completer.setPopup(self._bank_popup)
         self.bank_model_search.setCompleter(self._bank_model_completer)
         self._bank_model_completer.activated.connect(self._on_bank_model_selected_from_completer)
         info_layout.addRow("Search:", self.bank_model_search)
