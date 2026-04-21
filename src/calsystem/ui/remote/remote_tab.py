@@ -53,8 +53,8 @@ class RemoteTab(QWidget):
     def showEvent(self, event):
         """Refresh data when tab is shown."""
         super().showEvent(event)
-        # Reload model suggestions in case library was updated
-        self._load_bank_model_suggestions()
+        # Reload command banks and model suggestions when tab is shown
+        self._load_command_banks()
 
     def _init_ui(self):
         """Initialize the UI layout."""
@@ -492,6 +492,7 @@ class RemoteTab(QWidget):
         """Load all DUT command banks from database."""
         db = get_db()
         if not db.is_connected:
+            logger.warning("Database not connected, cannot load command banks")
             return
 
         try:
@@ -499,6 +500,8 @@ class RemoteTab(QWidget):
                 banks = session.query(DUTCommandBank).order_by(
                     DUTCommandBank.make, DUTCommandBank.model
                 ).all()
+
+                logger.info(f"Found {len(banks)} command banks in database")
 
                 self.bank_table.setRowCount(len(banks))
                 search_suggestions = []
@@ -528,11 +531,16 @@ class RemoteTab(QWidget):
                     search_suggestions.append(bank.make)
                     search_suggestions.append(bank.model)
 
+                    logger.debug(f"Loaded bank row {row}: {bank.make} {bank.model}")
+
                 # Update search autocomplete with unique values
                 self._bank_search_model.setStringList(sorted(set(search_suggestions)))
+                logger.info(f"Updated search suggestions: {search_suggestions}")
 
         except Exception as e:
             logger.error(f"Failed to load command banks: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
 
         # Also load autocomplete data for model search
         self._load_bank_model_suggestions()
