@@ -227,28 +227,33 @@ class RemoteTab(QWidget):
         # Device info
         info_layout = QFormLayout()
 
+        # Model search with autocomplete - type model number to search
+        self.bank_model_search = QLineEdit()
+        self.bank_model_search.setPlaceholderText("Type model number to search (e.g., 789, 87V)...")
+        self.bank_model_search.setToolTip("Start typing a model number to see matching devices from the library")
+
+        # Autocomplete setup
+        self._bank_model_data = {}  # Maps display string to model info dict
+        self._bank_model_completer = QCompleter()
+        self._bank_model_completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self._bank_model_completer.setFilterMode(Qt.MatchFlag.MatchContains)
+        self._bank_model_completer.setMaxVisibleItems(10)
+        # Use popup to show full text
+        from PyQt6.QtWidgets import QListView
+        popup = QListView()
+        popup.setMinimumWidth(300)
+        self._bank_model_completer.setPopup(popup)
+        self.bank_model_search.setCompleter(self._bank_model_completer)
+        self._bank_model_completer.activated.connect(self._on_bank_model_selected_from_completer)
+        info_layout.addRow("Search:", self.bank_model_search)
+
+        # Make/Model fields (auto-filled from search or manual entry)
         self.bank_make_input = QLineEdit()
         self.bank_make_input.setPlaceholderText("e.g., Fluke")
-        # Add autocomplete for make
-        self._make_completer = QCompleter()
-        self._make_completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
-        self._make_completer.setFilterMode(Qt.MatchFlag.MatchContains)
-        self._make_model = QStringListModel()
-        self._make_completer.setModel(self._make_model)
-        self.bank_make_input.setCompleter(self._make_completer)
-        # Update model suggestions when make changes
-        self.bank_make_input.textChanged.connect(self._update_model_suggestions)
         info_layout.addRow("Make:", self.bank_make_input)
 
         self.bank_model_input = QLineEdit()
         self.bank_model_input.setPlaceholderText("e.g., 789")
-        # Add autocomplete for model
-        self._model_completer = QCompleter()
-        self._model_completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
-        self._model_completer.setFilterMode(Qt.MatchFlag.MatchContains)
-        self._model_model = QStringListModel()
-        self._model_completer.setModel(self._model_model)
-        self.bank_model_input.setCompleter(self._model_completer)
         info_layout.addRow("Model:", self.bank_model_input)
 
         self.comm_type_combo = QComboBox()
@@ -507,81 +512,81 @@ class RemoteTab(QWidget):
         except Exception as e:
             logger.error(f"Failed to load command banks: {e}")
 
-        # Also load autocomplete data
-        self._load_make_suggestions()
-        self._update_model_suggestions("")  # Load all models initially
+        # Also load autocomplete data for model search
+        self._load_bank_model_suggestions()
 
-    def _load_make_suggestions(self):
-        """Load manufacturer names for autocomplete."""
-        makes = set()
+    def _load_bank_model_suggestions(self):
+        """Load device models into the search autocomplete."""
+        self._bank_model_data = {}  # Clear existing data
+
         db = get_db()
         if not db.is_connected:
             return
 
         try:
             with db.session() as session:
-                # Get makes from existing command banks
-                banks = session.query(DUTCommandBank.make).distinct().all()
-                for (make,) in banks:
-                    if make:
-                        makes.add(make)
+                completion_list = []
 
-                # Also get makes from device model library
-                manufacturers = session.query(Manufacturer.name).all()
-                for (name,) in manufacturers:
-                    if name:
-                        makes.add(name)
+                # Get models from device model library
+                models = session.query(DeviceModel).join(
+                    DeviceModel.manufacturer
+                ).order_by(
+                    DeviceModel.model_number
+                ).all()
 
-            self._make_model.setStringList(sorted(makes))
-            logger.debug(f"Loaded {len(makes)} make suggestions")
+                for model in models:
+                    make = model.manufacturer.name if model.manufacturer else "Unknown"
+                    # Display format: "789 - Fluke Processmeter" (model first for easy typing)
+                    label = f"{model.model_number} - {make}"
+                    if model.description:
+                        label += f" {model.description}"
+
+                    completion_list.append(label)
+                    # Store model data for lookup when selected
+                    self._bank_model_data[label] = {
+                        "make": make,
+                        "model": model.model_number,
+                        "description": model.description or "",
+                    }
+
+                # Also add existing command bank make/models that might not be in library
+                banks = session.query(DUTCommandBank).all()
+                for bank in banks:
+                    label = f"{bank.model} - {bank.make}"
+                    if label not in self._bank_model_data:
+                        completion_list.append(label)
+                        self._bank_model_data[label] = {
+                            "make": bank.make,
+                            "model": bank.model,
+                            "description": bank.description or "",
+                        }
+
+                # Set up completer with the list
+                string_model = QStringListModel(completion_list)
+                self._bank_model_completer.setModel(string_model)
+
+                logger.debug(f"Loaded {len(completion_list)} models into command bank search")
 
         except Exception as e:
-            logger.error(f"Failed to load make suggestions: {e}")
+            logger.error(f"Failed to load bank model suggestions: {e}")
 
-    def _update_model_suggestions(self, make_text: str):
-        """Update model suggestions based on current make."""
-        models = set()
-        db = get_db()
-        if not db.is_connected:
-            self._model_model.setStringList([])
+    def _on_bank_model_selected_from_completer(self, text: str):
+        """Handle selection from model search autocomplete."""
+        if text not in self._bank_model_data:
             return
 
-        try:
-            with db.session() as session:
-                # Get models from existing command banks for this make
-                if make_text:
-                    banks = session.query(DUTCommandBank.model).filter(
-                        DUTCommandBank.make.ilike(f"%{make_text}%")
-                    ).distinct().all()
-                    for (model,) in banks:
-                        if model:
-                            models.add(model)
+        model_info = self._bank_model_data[text]
 
-                    # Also get models from device model library
-                    device_models = session.query(DeviceModel.model_number).join(
-                        Manufacturer
-                    ).filter(
-                        Manufacturer.name.ilike(f"%{make_text}%")
-                    ).all()
-                    for (model_num,) in device_models:
-                        if model_num:
-                            models.add(model_num)
-                else:
-                    # If no make entered, show all models
-                    banks = session.query(DUTCommandBank.model).distinct().all()
-                    for (model,) in banks:
-                        if model:
-                            models.add(model)
+        # Auto-fill the make and model fields
+        self.bank_make_input.setText(model_info["make"])
+        self.bank_model_input.setText(model_info["model"])
+        if model_info["description"] and not self.bank_description_input.text():
+            self.bank_description_input.setText(model_info["description"])
 
-                    device_models = session.query(DeviceModel.model_number).all()
-                    for (model_num,) in device_models:
-                        if model_num:
-                            models.add(model_num)
+        # Clear the search field after selection
+        self.bank_model_search.clear()
 
-            self._model_model.setStringList(sorted(models))
-
-        except Exception as e:
-            logger.error(f"Failed to update model suggestions: {e}")
+        logger.debug(f"Selected model from search: {model_info['make']} {model_info['model']}")
 
     def _filter_banks(self, text: str):
         """Filter command banks by search text."""
@@ -678,6 +683,7 @@ class RemoteTab(QWidget):
     def _on_new_bank(self):
         """Create a new command bank."""
         self._current_bank_id = None
+        self.bank_model_search.clear()
         self.bank_make_input.clear()
         self.bank_model_input.clear()
         self.bank_description_input.clear()
