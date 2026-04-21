@@ -56,6 +56,288 @@ from calsystem.ui.dialogs.calibrator_selection_dialog import CalibratorSelection
 from calsystem.instruments.visa_manager import get_visa_manager, PYVISA_AVAILABLE, InstrumentInfo
 
 
+class FlowStepWidget(QWidget):
+    """A single step in the flow preview."""
+
+    # Step type icons (using Unicode symbols for simplicity)
+    ICONS = {
+        "section": "📋",
+        "section_cmd": "🔧",
+        "precondition": "⚡",
+        "dut_precheck": "📡",
+        "source": "📤",
+        "operate": "▶️",
+        "wait": "⏱️",
+        "measure": "📥",
+        "tolerance": "✅",
+        "standby": "⏹️",
+        "record": "💾",
+        "prompt": "💬",
+        "dmm": "🔬",
+        "formula": "🧮",
+        "dut_postread": "📲",
+    }
+
+    def __init__(self, step_type: str, title: str, detail: str = "", parent=None):
+        super().__init__(parent)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 4, 8, 4)
+
+        # Icon
+        icon = self.ICONS.get(step_type, "•")
+        icon_label = QLabel(icon)
+        icon_label.setFixedWidth(30)
+        icon_label.setStyleSheet("font-size: 16px;")
+        layout.addWidget(icon_label)
+
+        # Content
+        content_layout = QVBoxLayout()
+        content_layout.setSpacing(2)
+
+        title_label = QLabel(f"<b>{title}</b>")
+        title_label.setStyleSheet("font-size: 12px;")
+        content_layout.addWidget(title_label)
+
+        if detail:
+            detail_label = QLabel(detail)
+            detail_label.setStyleSheet("font-size: 11px; color: #666;")
+            detail_label.setWordWrap(True)
+            content_layout.addWidget(detail_label)
+
+        layout.addLayout(content_layout, 1)
+
+
+class FlowPreviewWidget(QWidget):
+    """Widget that displays the execution flow for a test point."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._init_ui()
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        # Header
+        header = QLabel("Execution Flow Preview")
+        header.setStyleSheet("font-weight: bold; font-size: 13px; padding: 8px;")
+        layout.addWidget(header)
+
+        # Scroll area for flow steps
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        self.flow_container = QWidget()
+        self.flow_layout = QVBoxLayout(self.flow_container)
+        self.flow_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.flow_layout.setSpacing(2)
+
+        scroll.setWidget(self.flow_container)
+        layout.addWidget(scroll)
+
+        # Initial empty state
+        self._show_empty_state()
+
+    def _show_empty_state(self):
+        """Show message when no test point is selected."""
+        self._clear_flow()
+        empty_label = QLabel("Select a test point to see its execution flow")
+        empty_label.setStyleSheet("color: #888; font-style: italic; padding: 20px;")
+        empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.flow_layout.addWidget(empty_label)
+
+    def _clear_flow(self):
+        """Clear all flow steps."""
+        while self.flow_layout.count():
+            item = self.flow_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+    def _add_step(self, step_type: str, title: str, detail: str = ""):
+        """Add a step to the flow."""
+        step = FlowStepWidget(step_type, title, detail)
+        self.flow_layout.addWidget(step)
+
+    def _add_arrow(self):
+        """Add a down arrow between steps."""
+        arrow = QLabel("  ↓")
+        arrow.setStyleSheet("color: #888; font-size: 14px;")
+        arrow.setFixedHeight(20)
+        self.flow_layout.addWidget(arrow)
+
+    def update_flow(self, test_point_data: dict):
+        """Update the flow display based on test point configuration."""
+        self._clear_flow()
+
+        if not test_point_data:
+            self._show_empty_state()
+            return
+
+        test_type = test_point_data.get("test_type", "measurement")
+        steps_added = 0
+
+        # 1. Section info (if available)
+        section_name = test_point_data.get("section_name")
+        if section_name:
+            self._add_step("section", f"Section: {section_name}")
+            steps_added += 1
+
+        # 2. Section commands
+        section_commands = test_point_data.get("section_commands")
+        if section_commands:
+            self._add_arrow()
+            self._add_step("section_cmd", "Section Commands", section_commands)
+            steps_added += 1
+
+        # 3. Operator prompt (if configured)
+        operator_prompt = test_point_data.get("operator_prompt")
+        if operator_prompt:
+            if steps_added > 0:
+                self._add_arrow()
+            self._add_step("prompt", "Operator Prompt", operator_prompt[:100] + "..." if len(operator_prompt) > 100 else operator_prompt)
+            steps_added += 1
+
+        # 4. Pre-conditioning
+        pre_nominal = test_point_data.get("pre_nominal_value")
+        if pre_nominal and pre_nominal != 0:
+            if steps_added > 0:
+                self._add_arrow()
+            pre_unit = test_point_data.get("pre_unit", "")
+            pre_delay = test_point_data.get("pre_delay_seconds", 0)
+            detail = f"{pre_nominal} {pre_unit}"
+            if pre_delay:
+                detail += f" for {pre_delay}s"
+            self._add_step("precondition", "Pre-Conditioning", detail)
+            steps_added += 1
+
+        # 5. DUT Pre-Check
+        dut_precheck = test_point_data.get("dut_pre_check_command")
+        if dut_precheck:
+            if steps_added > 0:
+                self._add_arrow()
+            expected = test_point_data.get("dut_pre_check_expected", "")
+            detail = f"Command: {dut_precheck}"
+            if expected:
+                detail += f" → expects '{expected}'"
+            self._add_step("dut_precheck", "DUT State Check", detail)
+            steps_added += 1
+
+        # 6. Source command (calibrator output)
+        source_cmd = test_point_data.get("source_command")
+        if source_cmd or test_type in ["measurement", "pass_fail", "calibrator_dmm"]:
+            if steps_added > 0:
+                self._add_arrow()
+            nominal = test_point_data.get("nominal_value", 0)
+            unit = test_point_data.get("unit", "")
+            freq = test_point_data.get("frequency")
+
+            if source_cmd:
+                detail = source_cmd
+            else:
+                detail = f"Output: {nominal} {unit}"
+                if freq:
+                    detail += f" @ {freq} Hz"
+
+            self._add_step("source", "Calibrator Output", detail)
+            steps_added += 1
+
+        # 7. Operate command
+        operate_cmd = test_point_data.get("operate_command")
+        if operate_cmd:
+            self._add_arrow()
+            self._add_step("operate", "Operate", operate_cmd)
+            steps_added += 1
+
+        # 8. Settling delay
+        settling = test_point_data.get("settling_time", 0)
+        if settling and settling > 0:
+            self._add_arrow()
+            self._add_step("wait", "Wait for Settling", f"{settling} seconds")
+            steps_added += 1
+
+        # 9. Measurement / Reading
+        if steps_added > 0:
+            self._add_arrow()
+
+        if test_type == "pass_fail":
+            # Pass/Fail check
+            pf_prompt = test_point_data.get("pass_fail_prompt") or test_point_data.get("operator_prompt") or "Visual check"
+            self._add_step("measure", "Pass/Fail Check", pf_prompt[:80] + "..." if len(pf_prompt) > 80 else pf_prompt)
+
+            # Check if there's also a range/value check
+            pf_min = test_point_data.get("pass_fail_min")
+            pf_max = test_point_data.get("pass_fail_max")
+            comparison = test_point_data.get("pass_fail_comparison_type", "range")
+            if pf_min is not None or pf_max is not None:
+                self._add_arrow()
+                if comparison == "gt":
+                    detail = f"Must be > {pf_min}"
+                elif comparison == "lt":
+                    detail = f"Must be < {pf_max}"
+                else:
+                    detail = f"Must be between {pf_min} and {pf_max}"
+                self._add_step("dmm", "DMM Value Check", detail)
+
+        elif test_type == "calculated":
+            formula = test_point_data.get("formula", "")
+            self._add_step("formula", "Calculate Result", formula or "Using formula")
+
+        elif test_type in ["dmm_measurement", "calibrator_dmm"]:
+            dmm_config = test_point_data.get("dmm_config", {})
+            if dmm_config:
+                func = dmm_config.get("function", "DCV")
+                range_val = dmm_config.get("range", "AUTO")
+                detail = f"Function: {func}, Range: {range_val}"
+            else:
+                detail = "Read from DMM"
+            self._add_step("dmm", "DMM Reading", detail)
+
+        else:
+            # Standard measurement - check for DUT post-read
+            dut_postread = test_point_data.get("dut_post_read_command")
+            if dut_postread:
+                parser = test_point_data.get("dut_post_read_parser", "numeric")
+                self._add_step("dut_postread", "Read from DUT", f"Command: {dut_postread} (parse as {parser})")
+            else:
+                self._add_step("measure", "Manual Reading Entry", "Technician enters measured value")
+
+        steps_added += 1
+
+        # 10. Tolerance check
+        tol_pct = test_point_data.get("tol_pct_reading", 0)
+        tol_abs = test_point_data.get("tol_absolute", 0)
+        if tol_pct or tol_abs or test_type != "pass_fail":
+            self._add_arrow()
+            tol_parts = []
+            if tol_pct:
+                tol_parts.append(f"±{tol_pct}% rdg")
+            if test_point_data.get("tol_pct_range"):
+                tol_parts.append(f"±{test_point_data['tol_pct_range']}% range")
+            if tol_abs:
+                tol_parts.append(f"±{tol_abs} abs")
+            if test_point_data.get("tol_digits"):
+                tol_parts.append(f"±{test_point_data['tol_digits']} digits")
+
+            detail = ", ".join(tol_parts) if tol_parts else "Check against specification"
+            self._add_step("tolerance", "Tolerance Check", detail)
+            steps_added += 1
+
+        # 11. Standby command
+        standby_cmd = test_point_data.get("standby_command")
+        if standby_cmd:
+            self._add_arrow()
+            self._add_step("standby", "Standby", standby_cmd)
+            steps_added += 1
+
+        # 12. Record result
+        self._add_arrow()
+        self._add_step("record", "Record Result", "Save measurement and pass/fail status")
+
+        # Add stretch at end
+        self.flow_layout.addStretch()
+
+
 class SectionEditDialog(QDialog):
     """Dialog for editing section name, standard type, and section command."""
 
@@ -1845,6 +2127,53 @@ class ProceduresTab(QWidget):
         self.details_tabs.addTab(dut_remote_widget, "DUT Remote")
         self._dut_remote_tab_index = self.details_tabs.count() - 1
 
+        # ===== FLOW PREVIEW TAB =====
+        self.flow_preview = FlowPreviewWidget()
+        self.details_tabs.addTab(self.flow_preview, "Flow")
+        self._flow_tab_index = self.details_tabs.count() - 1
+
+        # Connect signals to update flow preview in real-time
+        self._connect_flow_signals()
+
+    def _connect_flow_signals(self):
+        """Connect form field signals to update flow preview."""
+        # Test type
+        self.test_type_combo.currentIndexChanged.connect(self._update_flow_preview)
+        # Basic values
+        self.nominal_input.valueChanged.connect(self._update_flow_preview)
+        self.unit_combo.currentTextChanged.connect(self._update_flow_preview)
+        self.frequency_input.valueChanged.connect(self._update_flow_preview)
+        # Pre-conditioning
+        self.pre_nominal_input.valueChanged.connect(self._update_flow_preview)
+        self.pre_unit_combo.currentTextChanged.connect(self._update_flow_preview)
+        self.pre_delay_input.valueChanged.connect(self._update_flow_preview)
+        # Commands
+        self.source_cmd_input.textChanged.connect(self._update_flow_preview)
+        self.operate_cmd_input.textChanged.connect(self._update_flow_preview)
+        # Tolerance fields
+        if hasattr(self, 'tol_pct_reading_input'):
+            self.tol_pct_reading_input.valueChanged.connect(self._update_flow_preview)
+        if hasattr(self, 'tol_pct_range_input'):
+            self.tol_pct_range_input.valueChanged.connect(self._update_flow_preview)
+        if hasattr(self, 'tol_absolute_input'):
+            self.tol_absolute_input.valueChanged.connect(self._update_flow_preview)
+        if hasattr(self, 'tol_digits_input'):
+            self.tol_digits_input.valueChanged.connect(self._update_flow_preview)
+        # Pass/Fail
+        self.operator_prompt_edit.textChanged.connect(self._update_flow_preview)
+        self.pass_fail_min_input.valueChanged.connect(self._update_flow_preview)
+        self.pass_fail_max_input.valueChanged.connect(self._update_flow_preview)
+        self.pass_fail_gt_input.valueChanged.connect(self._update_flow_preview)
+        self.pass_fail_lt_input.valueChanged.connect(self._update_flow_preview)
+        self.pass_fail_check_tabs.currentChanged.connect(self._update_flow_preview)
+        # Formula
+        self.formula_input.textChanged.connect(self._update_flow_preview)
+        # DUT Remote
+        self.dut_precheck_cmd_combo.currentTextChanged.connect(self._update_flow_preview)
+        self.dut_precheck_expected_input.textChanged.connect(self._update_flow_preview)
+        self.dut_postread_cmd_combo.currentTextChanged.connect(self._update_flow_preview)
+        self.dut_postread_parser_combo.currentTextChanged.connect(self._update_flow_preview)
+
     def _on_test_type_changed(self, index: int):
         """Show/hide tabs based on selected test type."""
         # Tab visibility matrix:
@@ -1934,6 +2263,85 @@ class ProceduresTab(QWidget):
         self.dut_precheck_expected_input.clear()
         self.dut_postread_cmd_combo.setCurrentIndex(0)
         self.dut_postread_parser_combo.setCurrentIndex(0)
+        # Clear flow preview
+        self.flow_preview.update_flow(None)
+
+    def _update_flow_preview(self):
+        """Update the flow preview with current form values."""
+        # Gather all current form data
+        test_type_index = self.test_type_combo.currentIndex()
+        test_types = ["measurement", "pass_fail", "calculated", "dmm_measurement", "calibrator_dmm"]
+        test_type = test_types[test_type_index] if test_type_index < len(test_types) else "measurement"
+
+        # Get section info if a test point is selected
+        section_name = None
+        section_commands = None
+        current = self.structure_tree.currentItem()
+        if current:
+            data = current.data(0, Qt.ItemDataRole.UserRole)
+            if data and data[0] == "testpoint":
+                parent = current.parent()
+                if parent:
+                    section_name = parent.text(0)
+                    # Get section commands from database if available
+                    section_data = parent.data(0, Qt.ItemDataRole.UserRole)
+                    if section_data and section_data[0] == "section":
+                        section_id = section_data[1]
+                        db = get_db()
+                        if db.is_connected:
+                            try:
+                                with db.session() as session:
+                                    section = session.query(TestSection).get(section_id)
+                                    if section and section.section_command:
+                                        import json
+                                        try:
+                                            cmds = json.loads(section.section_command)
+                                            if isinstance(cmds, list):
+                                                section_commands = ", ".join(cmds)
+                                        except:
+                                            section_commands = section.section_command
+                            except Exception:
+                                pass
+
+        data = {
+            "test_type": test_type,
+            "section_name": section_name,
+            "section_commands": section_commands,
+            # Basic values
+            "nominal_value": self.nominal_input.value(),
+            "unit": self.unit_combo.currentText(),
+            "frequency": self.frequency_input.value() if self.frequency_input.value() > 0 else None,
+            # Pre-conditioning
+            "pre_nominal_value": self.pre_nominal_input.value() if self.pre_nominal_input.value() != 0 else None,
+            "pre_unit": self.pre_unit_combo.currentText(),
+            "pre_delay_seconds": self.pre_delay_input.value() if self.pre_delay_input.value() > 0 else None,
+            # Commands
+            "source_command": self.source_cmd_input.text() or None,
+            "operate_command": self.operate_cmd_input.text() or None,
+            "standby_command": None,  # TODO: Add standby command field if needed
+            # Tolerance
+            "tol_pct_reading": self.tol_pct_reading_input.value() if hasattr(self, 'tol_pct_reading_input') else 0,
+            "tol_pct_range": self.tol_pct_range_input.value() if hasattr(self, 'tol_pct_range_input') else 0,
+            "tol_absolute": self.tol_absolute_input.value() if hasattr(self, 'tol_absolute_input') else 0,
+            "tol_digits": self.tol_digits_input.value() if hasattr(self, 'tol_digits_input') else 0,
+            # Pass/Fail
+            "operator_prompt": self.operator_prompt_edit.toPlainText() or None,
+            "pass_fail_prompt": self.pass_fail_prompt_input.toPlainText() if hasattr(self, 'pass_fail_prompt_input') else None,
+            "pass_fail_min": self.pass_fail_min_input.value() if self.pass_fail_min_input.value() > self.pass_fail_min_input.minimum() else None,
+            "pass_fail_max": self.pass_fail_max_input.value() if self.pass_fail_max_input.value() > self.pass_fail_max_input.minimum() else None,
+            "pass_fail_comparison_type": ["range", "gt", "lt"][self.pass_fail_check_tabs.currentIndex()] if hasattr(self, 'pass_fail_check_tabs') else "range",
+            # DMM config
+            "dmm_config": self._save_dmm_config() if test_type in ["pass_fail", "dmm_measurement", "calibrator_dmm"] else None,
+            # Formula
+            "formula": self.formula_input.text() or None,
+            # DUT Remote
+            "dut_pre_check_command": self.dut_precheck_cmd_combo.currentText() or None,
+            "dut_pre_check_expected": self.dut_precheck_expected_input.text() or None,
+            "dut_post_read_command": self.dut_postread_cmd_combo.currentText() or None,
+            "dut_post_read_parser": self.dut_postread_parser_combo.currentText() or None,
+        }
+
+        self.flow_preview.update_flow(data)
 
     def _on_measurement_target_changed(self, text: str):
         """Show/hide custom expected value fields based on measurement target selection."""
@@ -2738,6 +3146,7 @@ class ProceduresTab(QWidget):
         if item_type == "section":
             self._load_section_details(item_id)
             self.details_stack.setCurrentIndex(0)  # Show section details
+            self.flow_preview.update_flow(None)  # Clear flow preview for sections
         elif item_type == "testpoint":
             self._load_testpoint_details(item_id)
             self.details_stack.setCurrentIndex(1)  # Show test point details
@@ -3416,6 +3825,9 @@ class ProceduresTab(QWidget):
                     self.dut_postread_parser_combo.setCurrentIndex(0)
 
                 logger.debug(f"Loaded test point: {tp_id}")
+
+                # Update flow preview with loaded test point data
+                self._update_flow_preview()
 
         except Exception as e:
             logger.error(f"Failed to load test point: {e}")
