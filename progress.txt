@@ -768,3 +768,97 @@
 - Reading format stored in dmm_config JSON dict, automatically serialized
 
 ---
+
+## 2026-04-21 - DUT Remote Communication Enhancements (Version 0.9.0)
+
+### 1. DUT Setup Command (Send commands to configure DUT)
+- **What was implemented:**
+  - Added "Setup Command" section to DUT Remote tab in test point editor
+  - Sends commands TO the DUT to configure it (change range, set mode, etc.)
+  - Flow: Setup Command → Pre-Check → Calibrator Output → Post-Read
+  - New fields: `dut_setup_command`, `dut_setup_param` in TestPoint model
+  - Execution: `_execute_dut_setup()` method sends command before pre-check
+- **Files changed:**
+  - src/calsystem/database/models.py
+  - src/calsystem/database/connection.py (migrations)
+  - src/calsystem/procedures/procedure_data.py
+  - src/calsystem/ui/procedures/procedures_tab.py
+  - src/calsystem/ui/execution/execution_tab.py
+
+### 2. Expanded Standard DUT Commands
+- **What was implemented:**
+  - Expanded STANDARD_DUT_COMMANDS from 8 to 24 commands:
+    - Control: Identity, Reset, Clear
+    - State queries: Query Position/Range/Mode/Function/Buttons/Status/Scale/Input/Terminal
+    - Set commands: Set Position/Range/Mode/Function (with {value} placeholder)
+    - Measurement: Read Value/Primary/Secondary, Trigger Read, Fetch, Read All
+    - Fluke 789 specific: 789 Query Position, 789 Query Range, 789 Read Value, 789 Set Position
+  - Dropdowns dynamically populated from STANDARD_DUT_COMMANDS list
+  - Categories: control, state, set, measure, fluke789
+- **Files changed:**
+  - src/calsystem/database/models.py (STANDARD_DUT_COMMANDS)
+  - src/calsystem/ui/procedures/procedures_tab.py (dynamic dropdowns)
+
+### 3. Parameterized Commands ({value} substitution)
+- **What was implemented:**
+  - Commands can contain `{value}` placeholder (e.g., "PS R,{value}")
+  - Parameter field in UI allows specifying value (e.g., "1")
+  - At execution, {value} is replaced with parameter (e.g., "PS R,1")
+  - Works for Setup Command, Pre-Check, and Post-Read commands
+  - New fields: `dut_pre_check_param`, `dut_post_read_param` in TestPoint
+- **Files changed:**
+  - src/calsystem/database/models.py
+  - src/calsystem/database/connection.py
+  - src/calsystem/procedures/procedure_data.py
+  - src/calsystem/ui/procedures/procedures_tab.py
+  - src/calsystem/ui/execution/execution_tab.py (_query_dut, _send_dut_command)
+
+### 4. CSV Response Parsing
+- **What was implemented:**
+  - New parser type: `csv_field` for comma-separated DUT responses
+  - Example: "QM,+0.000E+00,VDC,AUTO" - select which field contains reading
+  - CSV Position field (0-based index) specifies field location
+  - Visual example under field showing 0-based indexing: "[0] [1] [2] [3] [4]"
+  - Reminder text: "Position starts at 0, not 1!"
+  - New field: `dut_post_read_index` in TestPoint model
+- **Parser types:**
+  - `numeric` - Extract first number from response (handles scientific notation)
+  - `csv_field` - Split by comma, extract field at specified index
+  - `string` - Return raw response as-is
+- **Files changed:**
+  - src/calsystem/database/models.py
+  - src/calsystem/database/connection.py
+  - src/calsystem/procedures/procedure_data.py
+  - src/calsystem/ui/procedures/procedures_tab.py
+  - src/calsystem/ui/execution/execution_tab.py
+
+### 5. Flow Preview Updates
+- **What was implemented:**
+  - Added 🔄 icon for "Configure DUT" (setup command) step
+  - Flow shows setup command with parameter if configured
+  - CSV parsing shown as "→ CSV field [1]" format
+- **Files changed:**
+  - src/calsystem/ui/procedures/procedures_tab.py (FlowStepWidget.ICONS)
+
+### Database Changes
+New columns added to test_points table:
+- `dut_setup_command` VARCHAR(50)
+- `dut_setup_param` VARCHAR(100)
+- `dut_pre_check_param` VARCHAR(100)
+- `dut_post_read_param` VARCHAR(100)
+- `dut_post_read_index` INTEGER
+
+### DUT Remote Execution Flow (in order)
+1. 🔄 **Configure DUT** - Send setup command (if configured)
+2. 📡 **DUT State Check** - Query DUT, verify expected response (if configured)
+3. 📤 **Calibrator Output** - Send output to calibrator
+4. 📲 **Read from DUT** - Capture measurement, parse CSV if needed (if configured)
+
+### Learnings
+- DUT remote flow: Setup (send) → Pre-check (query/verify) → Output → Post-read (query/capture)
+- CSV parsing: 0-based indexing is not intuitive - always add visual example
+- Parameter substitution uses simple string replace: `command.replace("{value}", param)`
+- STANDARD_DUT_COMMANDS organized by category for dropdown filtering
+- Flow preview icons help users visualize execution sequence
+
+---
