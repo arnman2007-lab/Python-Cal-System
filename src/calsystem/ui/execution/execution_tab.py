@@ -3220,6 +3220,17 @@ class ExecutionTab(QWidget):
                         "pass_fail_comparison_type": tp.pass_fail_comparison_type,
                         # DMM configuration
                         "dmm_config": tp.dmm_config,
+                        # DUT Remote Communication
+                        "dut_setup_command": tp.dut_setup_command,
+                        "dut_setup_param": tp.dut_setup_param,
+                        "dut_pre_check_command": tp.dut_pre_check_command,
+                        "dut_pre_check_param": tp.dut_pre_check_param,
+                        "dut_pre_check_expected": tp.dut_pre_check_expected,
+                        "dut_pre_check_prompt": tp.dut_pre_check_prompt,
+                        "dut_post_read_command": tp.dut_post_read_command,
+                        "dut_post_read_param": tp.dut_post_read_param,
+                        "dut_post_read_parser": tp.dut_post_read_parser,
+                        "dut_post_read_index": tp.dut_post_read_index,
                     })
 
             if not self._test_points:
