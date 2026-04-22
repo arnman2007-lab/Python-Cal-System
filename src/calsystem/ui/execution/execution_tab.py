@@ -198,12 +198,12 @@ class SessionStartDialog(QDialog):
         ports = serial_mgr.scan()
 
         for port_info in ports:
-            port = port_info.get('port', '')
+            port = port_info.port  # SerialPortInfo is a dataclass, not a dict
             # Skip COM1 (usually reserved/unused)
             if port.upper() == 'COM1':
                 continue
 
-            desc = port_info.get('description', '')
+            desc = port_info.description or ''
             display_text = f"{port} - {desc}" if desc else port
             item = QListWidgetItem(display_text)
             item.setData(Qt.ItemDataRole.UserRole, port)
