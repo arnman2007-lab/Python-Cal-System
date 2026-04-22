@@ -1559,9 +1559,16 @@ class ExecutionTab(QWidget):
                     logger.info(f"Loaded DUT command bank for {dut.make} {dut.model}: {cmd_list}")
                     self.status_display.append(f"DUT commands loaded: {', '.join(cmd_list)}")
                     self.status_display.append(f"DUT COM port: {self._dut_com_port}")
+
+                    # Try to connect to DUT serial port now
+                    if self._connect_dut_serial():
+                        self.status_display.append(f"DUT serial connected on {self._dut_com_port}")
+                    else:
+                        self.status_display.append(f"WARNING: Could not connect to DUT on {self._dut_com_port}")
                 else:
                     logger.info(f"No DUT command bank for {dut.make} {dut.model}")
-                    self.status_display.append(f"NOTE: No command bank found for {dut.make} {dut.model}")
+                    self.status_display.append(f"WARNING: No command bank found for {dut.make} {dut.model}")
+                    self.status_display.append("Remote readings will require manual entry")
 
         except Exception as e:
             logger.error(f"Failed to load DUT commands: {e}")
@@ -3743,16 +3750,25 @@ class ExecutionTab(QWidget):
             self.status_display.append("Output set - ready for reading")
 
             # DUT Post-Read: Automatically capture reading from DUT if configured
-            if tp.get('dut_post_read_command') and self._session_input_method == "remote":
-                # Small delay to let DUT settle
-                time.sleep(0.3)
-                dut_reading = self._execute_dut_postread(tp)
-                if dut_reading is not None:
-                    # Auto-populate the reading input field
-                    self.reading_input.setText(str(dut_reading))
-                    self.status_display.append(f"DUT Reading captured: {dut_reading}")
-                    # Auto-submit the reading in remote mode
-                    QTimer.singleShot(500, self._on_submit_reading)
+            if self._session_input_method == "remote":
+                if tp.get('dut_post_read_command'):
+                    # Small delay to let DUT settle
+                    time.sleep(0.3)
+                    self.status_display.append(f"Querying DUT for reading...")
+                    dut_reading = self._execute_dut_postread(tp)
+                    if dut_reading is not None:
+                        # Auto-populate the reading input field
+                        self.reading_input.setText(str(dut_reading))
+                        self.status_display.append(f"DUT Reading captured: {dut_reading}")
+                        # Auto-submit the reading in remote mode
+                        QTimer.singleShot(500, self._on_submit_reading)
+                    else:
+                        self.status_display.append("DUT read failed - enter reading manually")
+                        self.reading_input.setFocus()
+                else:
+                    # Remote mode but no post-read command configured for this test point
+                    self.status_display.append("No DUT read command configured - enter reading manually")
+                    self.reading_input.setFocus()
         else:
             self.status_display.append("WARNING: Calibrator command failed!")
 
