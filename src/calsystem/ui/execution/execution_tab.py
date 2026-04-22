@@ -28,6 +28,10 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QDialog,
     QSizePolicy,
+    QListWidget,
+    QListWidgetItem,
+    QRadioButton,
+    QButtonGroup,
 )
 from PyQt6.QtCore import Qt, QTimer, QSize, QPropertyAnimation, QEasingCurve
 from PyQt6.QtGui import QFont, QColor, QPixmap
@@ -60,6 +64,204 @@ from calsystem.ui.dialogs.calibrator_selection_dialog import CalibratorSelection
 from calsystem.instruments.visa_manager import get_visa_manager, PYVISA_AVAILABLE
 from calsystem.instruments.serial_manager import get_serial_manager, SerialConfig
 from calsystem.procedures import CSPFile, ProcedureData
+
+
+class SessionStartDialog(QDialog):
+    """
+    Dialog shown at session start to select COM port and input method.
+
+    - Shows available COM ports (excludes COM1)
+    - Default selection is "None"
+    - If COM port selected: Remote automation mode
+    - If None: Choose Keyboard or OCR input method
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Session Setup - Reading Input")
+        self.setModal(True)
+        self.setMinimumWidth(450)
+        self.setMinimumHeight(350)
+
+        self._selected_port: Optional[str] = None
+        self._input_method: str = "keyboard"  # keyboard, remote, ocr
+
+        layout = QVBoxLayout(self)
+
+        # Title
+        title = QLabel("How will readings be captured?")
+        title.setStyleSheet("font-size: 16px; font-weight: bold;")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(title)
+        layout.addSpacing(15)
+
+        # COM Port section
+        port_group = QGroupBox("DUT Serial Connection")
+        port_layout = QVBoxLayout(port_group)
+
+        port_info = QLabel(
+            "If the DUT has a serial adapter cable, select the COM port.\n"
+            "This enables automatic state checking and reading capture."
+        )
+        port_info.setStyleSheet("color: #666; font-size: 11px;")
+        port_info.setWordWrap(True)
+        port_layout.addWidget(port_info)
+
+        self.port_list = QListWidget()
+        self.port_list.setMaximumHeight(120)
+        self.port_list.itemSelectionChanged.connect(self._on_port_selection_changed)
+        port_layout.addWidget(self.port_list)
+
+        # Populate COM ports
+        self._populate_ports()
+
+        layout.addWidget(port_group)
+        layout.addSpacing(10)
+
+        # Input method section (only visible when None is selected)
+        self.method_group = QGroupBox("Manual Input Method")
+        method_layout = QVBoxLayout(self.method_group)
+
+        method_info = QLabel(
+            "Without a serial connection, how should readings be entered?"
+        )
+        method_info.setStyleSheet("color: #666; font-size: 11px;")
+        method_layout.addWidget(method_info)
+
+        self.method_button_group = QButtonGroup(self)
+
+        self.keyboard_radio = QRadioButton("Keyboard Entry")
+        self.keyboard_radio.setToolTip("Tech manually types readings from DUT display")
+        self.keyboard_radio.setChecked(True)
+        self.method_button_group.addButton(self.keyboard_radio)
+        method_layout.addWidget(self.keyboard_radio)
+
+        self.ocr_radio = QRadioButton("Webcam OCR (Coming Soon)")
+        self.ocr_radio.setToolTip("Camera captures readings from DUT display")
+        self.ocr_radio.setEnabled(False)  # Not implemented yet
+        self.method_button_group.addButton(self.ocr_radio)
+        method_layout.addWidget(self.ocr_radio)
+
+        layout.addWidget(self.method_group)
+
+        layout.addStretch()
+
+        # Summary label
+        self.summary_label = QLabel()
+        self.summary_label.setStyleSheet(
+            "background-color: #e7f3ff; padding: 10px; border-radius: 5px; font-size: 12px;"
+        )
+        self.summary_label.setWordWrap(True)
+        layout.addWidget(self.summary_label)
+        self._update_summary()
+
+        layout.addSpacing(15)
+
+        # Buttons
+        button_layout = QHBoxLayout()
+
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        button_layout.addWidget(cancel_btn)
+
+        button_layout.addStretch()
+
+        self.start_btn = QPushButton("Start Session")
+        self.start_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #28a745;
+                color: white;
+                font-weight: bold;
+                padding: 10px 30px;
+                border-radius: 5px;
+            }
+            QPushButton:hover {
+                background-color: #218838;
+            }
+        """)
+        self.start_btn.clicked.connect(self._on_start)
+        button_layout.addWidget(self.start_btn)
+
+        layout.addLayout(button_layout)
+
+    def _populate_ports(self):
+        """Scan and populate available COM ports."""
+        self.port_list.clear()
+
+        # Add "None" option first (default)
+        none_item = QListWidgetItem("None - No serial connection")
+        none_item.setData(Qt.ItemDataRole.UserRole, None)
+        self.port_list.addItem(none_item)
+
+        # Scan for COM ports
+        serial_mgr = get_serial_manager()
+        ports = serial_mgr.scan()
+
+        for port_info in ports:
+            port = port_info.get('port', '')
+            # Skip COM1 (usually reserved/unused)
+            if port.upper() == 'COM1':
+                continue
+
+            desc = port_info.get('description', '')
+            display_text = f"{port} - {desc}" if desc else port
+            item = QListWidgetItem(display_text)
+            item.setData(Qt.ItemDataRole.UserRole, port)
+            self.port_list.addItem(item)
+
+        # Select "None" by default
+        self.port_list.setCurrentRow(0)
+
+    def _on_port_selection_changed(self):
+        """Handle port selection change."""
+        current = self.port_list.currentItem()
+        if current:
+            self._selected_port = current.data(Qt.ItemDataRole.UserRole)
+
+        # Show/hide input method selection based on port
+        has_port = self._selected_port is not None
+        self.method_group.setVisible(not has_port)
+
+        self._update_summary()
+
+    def _update_summary(self):
+        """Update the summary label."""
+        if self._selected_port:
+            self.summary_label.setText(
+                f"<b>Remote Automation Mode</b><br>"
+                f"Using {self._selected_port} for DUT communication.<br>"
+                f"Readings will be captured automatically via serial commands."
+            )
+            self.summary_label.setStyleSheet(
+                "background-color: #d4edda; padding: 10px; border-radius: 5px; font-size: 12px;"
+            )
+        else:
+            method = "Keyboard Entry" if self.keyboard_radio.isChecked() else "Webcam OCR"
+            self.summary_label.setText(
+                f"<b>Manual Mode - {method}</b><br>"
+                f"No serial connection. Tech will enter readings manually."
+            )
+            self.summary_label.setStyleSheet(
+                "background-color: #e7f3ff; padding: 10px; border-radius: 5px; font-size: 12px;"
+            )
+
+    def _on_start(self):
+        """Handle start button click."""
+        if self._selected_port:
+            self._input_method = "remote"
+        elif self.keyboard_radio.isChecked():
+            self._input_method = "keyboard"
+        else:
+            self._input_method = "ocr"
+        self.accept()
+
+    def get_selected_port(self) -> Optional[str]:
+        """Return the selected COM port or None."""
+        return self._selected_port
+
+    def get_input_method(self) -> str:
+        """Return the selected input method: 'remote', 'keyboard', or 'ocr'."""
+        return self._input_method
 
 
 class PassFailDialog(QDialog):
@@ -631,6 +833,9 @@ class ExecutionTab(QWidget):
         self._dut_commands: Optional[Dict[str, Any]] = None
         self._dut_serial_config: Optional[Dict[str, Any]] = None
         self._dut_serial_connected: bool = False
+        # Session input method (set by SessionStartDialog)
+        self._session_input_method: str = "keyboard"  # keyboard, remote, ocr
+        self._session_com_port: Optional[str] = None
         self._init_ui()
         self._connect_signals()
 
@@ -1317,6 +1522,13 @@ class ExecutionTab(QWidget):
         self._dut_serial_config = None
         self._dut_com_port = None
 
+        # Use COM port selected in session dialog (not from DUT record)
+        if self._session_input_method == "remote" and self._session_com_port:
+            self._dut_com_port = self._session_com_port
+        else:
+            # Not using remote mode - skip DUT command loading
+            return
+
         if not self._current_dut_id:
             return
 
@@ -1330,9 +1542,6 @@ class ExecutionTab(QWidget):
                 if not dut:
                     return
 
-                # Get COM port from DUT
-                self._dut_com_port = dut.com_port
-
                 # Find command bank for this make/model
                 cmd_bank = session.query(DUTCommandBank).filter(
                     DUTCommandBank.make.ilike(dut.make),
@@ -1345,13 +1554,10 @@ class ExecutionTab(QWidget):
                     cmd_list = list(self._dut_commands.keys())
                     logger.info(f"Loaded DUT command bank for {dut.make} {dut.model}: {cmd_list}")
                     self.status_display.append(f"DUT commands loaded: {', '.join(cmd_list)}")
-
-                    if self._dut_com_port:
-                        self.status_display.append(f"DUT COM port: {self._dut_com_port}")
-                    else:
-                        self.status_display.append("NOTE: No COM port assigned to DUT")
+                    self.status_display.append(f"DUT COM port: {self._dut_com_port}")
                 else:
                     logger.info(f"No DUT command bank for {dut.make} {dut.model}")
+                    self.status_display.append(f"NOTE: No command bank found for {dut.make} {dut.model}")
 
         except Exception as e:
             logger.error(f"Failed to load DUT commands: {e}")
@@ -2137,50 +2343,57 @@ class ExecutionTab(QWidget):
 
         left_layout.addWidget(wiring_group, stretch=2)  # Give wiring diagram more space
 
-        # Input method selection and reading
-        input_group = QGroupBox("Reading Input")
-        input_layout = QVBoxLayout(input_group)
-
-        method_layout = QHBoxLayout()
-        method_layout.addWidget(QLabel("Input Method:"))
+        # Hidden widgets for compatibility with existing code
+        # (Input method and DMM are now selected via SessionStartDialog)
         self.input_method_combo = QComboBox()
         self.input_method_combo.addItems(["Keyboard Entry", "Remote Reading", "Webcam OCR"])
-        self.input_method_combo.currentTextChanged.connect(self._on_input_method_changed)
-        method_layout.addWidget(self.input_method_combo)
-        method_layout.addStretch()
-        input_layout.addLayout(method_layout)
+        self.input_method_combo.setVisible(False)
 
-        # Reference DMM selector (for remote reading)
-        dmm_layout = QHBoxLayout()
-        dmm_layout.addWidget(QLabel("Reference DMM:"))
         self.dmm_combo = QComboBox()
         self.dmm_combo.addItem("-- Select DMM --", None)
-        self.dmm_combo.currentIndexChanged.connect(self._on_dmm_selected)
-        dmm_layout.addWidget(self.dmm_combo)
+        self.dmm_combo.setVisible(False)
 
         self.init_dmm_btn = QPushButton("Init")
-        self.init_dmm_btn.setToolTip("Initialize DMM with RESET and END ALWAYS")
-        self.init_dmm_btn.clicked.connect(self._on_init_dmm)
-        self.init_dmm_btn.setMaximumWidth(50)
-        dmm_layout.addWidget(self.init_dmm_btn)
+        self.init_dmm_btn.setVisible(False)
 
-        dmm_layout.addStretch()
-        input_layout.addLayout(dmm_layout)
+        # Reading entry - simplified (input method selected at session start)
+        input_group = QGroupBox("Reading")
+        input_layout = QVBoxLayout(input_group)
 
-        # Reading entry
-        reading_layout = QHBoxLayout()
+        # Input mode indicator (shows what was selected at session start)
+        self.input_mode_label = QLabel("Mode: Keyboard Entry")
+        self.input_mode_label.setStyleSheet("color: #666; font-size: 11px;")
+        input_layout.addWidget(self.input_mode_label)
+
+        # Large reading entry field
         self.reading_input = QLineEdit()
         self.reading_input.setPlaceholderText("Enter reading...")
         font = QFont()
-        font.setPointSize(18)
+        font.setPointSize(24)  # Larger font for easier reading
         self.reading_input.setFont(font)
+        self.reading_input.setMinimumHeight(50)
         self.reading_input.returnPressed.connect(self._on_submit_reading)
-        reading_layout.addWidget(self.reading_input)
+        input_layout.addWidget(self.reading_input)
+
+        # Buttons row
+        reading_layout = QHBoxLayout()
 
         self.submit_btn = QPushButton("Submit")
+        self.submit_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #007bff;
+                color: white;
+                font-weight: bold;
+                padding: 8px 20px;
+            }
+            QPushButton:hover { background-color: #0056b3; }
+        """)
         self.submit_btn.clicked.connect(self._on_submit_reading)
         reading_layout.addWidget(self.submit_btn)
 
+        reading_layout.addStretch()
+
+        # Hidden buttons for compatibility (kept for existing code references)
         self.get_reading_btn = QPushButton("Get Remote")
         self.get_reading_btn.clicked.connect(self._on_get_remote_reading)
         self.get_reading_btn.setVisible(False)
@@ -2361,6 +2574,23 @@ class ExecutionTab(QWidget):
                 return
             self.status_display.append("Continuing without calibrator...")
 
+        # Show session start dialog for COM port / input method selection
+        session_dialog = SessionStartDialog(self)
+        if session_dialog.exec() != QDialog.DialogCode.Accepted:
+            self.status_display.append("Session cancelled by user")
+            return
+
+        # Store the selected input method and COM port
+        self._session_input_method = session_dialog.get_input_method()
+        self._session_com_port = session_dialog.get_selected_port()
+
+        # Log the selection
+        if self._session_com_port:
+            self.status_display.append(f"DUT Serial Port: {self._session_com_port}")
+            self.status_display.append("Input Mode: Remote Automation")
+        else:
+            self.status_display.append(f"Input Mode: {self._session_input_method.title()}")
+
         db = get_db()
         if not db.is_connected:
             QMessageBox.critical(self, "Database Error", "Not connected to database.")
@@ -2403,6 +2633,21 @@ class ExecutionTab(QWidget):
             self.dut_combo.setEnabled(False)
             self.workorder_input.setEnabled(False)
             self.procedure_combo.setEnabled(False)
+
+            # Update input mode display
+            if self._session_input_method == "remote":
+                self.input_mode_label.setText(f"Mode: Remote ({self._session_com_port})")
+                self.input_mode_label.setStyleSheet("color: #28a745; font-size: 11px; font-weight: bold;")
+                # For remote, reading will auto-populate - show but disable manual entry
+                self.reading_input.setPlaceholderText("Reading will auto-populate...")
+            elif self._session_input_method == "ocr":
+                self.input_mode_label.setText("Mode: Webcam OCR")
+                self.input_mode_label.setStyleSheet("color: #17a2b8; font-size: 11px; font-weight: bold;")
+                self.reading_input.setPlaceholderText("Reading will be captured...")
+            else:
+                self.input_mode_label.setText("Mode: Keyboard Entry")
+                self.input_mode_label.setStyleSheet("color: #666; font-size: 11px;")
+                self.reading_input.setPlaceholderText("Enter reading...")
 
             # Show calibrator info in status
             if self._selected_calibrator:
@@ -2878,7 +3123,7 @@ class ExecutionTab(QWidget):
 
     def _focus_reading_input(self):
         """Focus the reading input box if keyboard entry is selected."""
-        if self.input_method_combo.currentText() == "Keyboard Entry":
+        if self._session_input_method == "keyboard":
             self.reading_input.setFocus()
             self.reading_input.selectAll()
 
@@ -3486,7 +3731,7 @@ class ExecutionTab(QWidget):
             self.status_display.append("Output set - ready for reading")
 
             # DUT Post-Read: Automatically capture reading from DUT if configured
-            if tp.get('dut_post_read_command'):
+            if tp.get('dut_post_read_command') and self._session_input_method == "remote":
                 # Small delay to let DUT settle
                 time.sleep(0.3)
                 dut_reading = self._execute_dut_postread(tp)
@@ -3494,6 +3739,8 @@ class ExecutionTab(QWidget):
                     # Auto-populate the reading input field
                     self.reading_input.setText(str(dut_reading))
                     self.status_display.append(f"DUT Reading captured: {dut_reading}")
+                    # Auto-submit the reading in remote mode
+                    QTimer.singleShot(500, self._on_submit_reading)
         else:
             self.status_display.append("WARNING: Calibrator command failed!")
 
@@ -4554,13 +4801,8 @@ class ExecutionTab(QWidget):
 
         try:
             with db.session() as session:
-                # Get input method
-                input_method_map = {
-                    0: "keyboard",
-                    1: "remote",
-                    2: "webcam",
-                }
-                input_method = input_method_map.get(self.input_method_combo.currentIndex(), "keyboard")
+                # Use session input method (set at session start)
+                input_method = self._session_input_method
 
                 result = TestResult(
                     session_id=self._current_session_id,
