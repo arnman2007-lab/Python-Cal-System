@@ -767,11 +767,6 @@ STANDARD_DUT_COMMANDS = [
     {"name": "Fetch", "description": "Fetch last measurement", "default_command": "FETCH?", "category": "measure"},
     {"name": "Read All", "description": "Read all display values", "default_command": "", "category": "measure"},
 
-    # Fluke 789 specific (common process meter)
-    {"name": "789 Query Position", "description": "Fluke 789 rotary switch position", "default_command": "QP", "category": "fluke789"},
-    {"name": "789 Query Range", "description": "Fluke 789 range query", "default_command": "QR", "category": "fluke789"},
-    {"name": "789 Read Value", "description": "Fluke 789 read measurement", "default_command": "VAL?", "category": "fluke789"},
-    {"name": "789 Set Position", "description": "Fluke 789 set position (use {value})", "default_command": "PS R,{value}", "category": "fluke789"},
 ]
 
 

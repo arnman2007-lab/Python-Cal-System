@@ -2086,7 +2086,7 @@ class ProceduresTab(QWidget):
         self.dut_setup_cmd_combo.setEditable(True)
         self.dut_setup_cmd_combo.addItem("")
         # Add set and control commands from standard list
-        setup_categories = ["set", "control", "fluke789"]
+        setup_categories = ["set", "control"]
         setup_cmds = [cmd["name"] for cmd in STANDARD_DUT_COMMANDS if cmd["category"] in setup_categories]
         self.dut_setup_cmd_combo.addItems(setup_cmds)
         self.dut_setup_cmd_combo.setToolTip(
@@ -2115,7 +2115,7 @@ class ProceduresTab(QWidget):
         self.dut_precheck_cmd_combo.setEditable(True)
         self.dut_precheck_cmd_combo.addItem("")
         # Add state query and set commands from standard list
-        precheck_categories = ["state", "set", "control", "fluke789"]
+        precheck_categories = ["state", "set", "control"]
         precheck_cmds = [cmd["name"] for cmd in STANDARD_DUT_COMMANDS if cmd["category"] in precheck_categories]
         self.dut_precheck_cmd_combo.addItems(precheck_cmds)
         self.dut_precheck_cmd_combo.setToolTip(
@@ -2163,7 +2163,7 @@ class ProceduresTab(QWidget):
         self.dut_postread_cmd_combo.setEditable(True)
         self.dut_postread_cmd_combo.addItem("")
         # Add measurement commands from standard list
-        postread_categories = ["measure", "fluke789"]
+        postread_categories = ["measure"]
         postread_cmds = [cmd["name"] for cmd in STANDARD_DUT_COMMANDS if cmd["category"] in postread_categories]
         self.dut_postread_cmd_combo.addItems(postread_cmds)
         self.dut_postread_cmd_combo.setToolTip(
