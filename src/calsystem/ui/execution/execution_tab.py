@@ -109,11 +109,8 @@ class SessionStartDialog(QDialog):
 
         self.port_list = QListWidget()
         self.port_list.setMaximumHeight(120)
-        self.port_list.itemSelectionChanged.connect(self._on_port_selection_changed)
+        # Note: Signal connected later after all widgets are created
         port_layout.addWidget(self.port_list)
-
-        # Populate COM ports
-        self._populate_ports()
 
         layout.addWidget(port_group)
         layout.addSpacing(10)
@@ -184,6 +181,10 @@ class SessionStartDialog(QDialog):
 
         layout.addLayout(button_layout)
 
+        # Now that all widgets are created, populate ports and connect signal
+        self._populate_ports()
+        self.port_list.itemSelectionChanged.connect(self._on_port_selection_changed)
+
     def _populate_ports(self):
         """Scan and populate available COM ports."""
         self.port_list.clear()
@@ -193,21 +194,24 @@ class SessionStartDialog(QDialog):
         none_item.setData(Qt.ItemDataRole.UserRole, None)
         self.port_list.addItem(none_item)
 
-        # Scan for COM ports
-        serial_mgr = get_serial_manager()
-        ports = serial_mgr.scan()
+        # Scan for COM ports (with error handling)
+        try:
+            serial_mgr = get_serial_manager()
+            ports = serial_mgr.scan()
 
-        for port_info in ports:
-            port = port_info.port  # SerialPortInfo is a dataclass, not a dict
-            # Skip COM1 (usually reserved/unused)
-            if port.upper() == 'COM1':
-                continue
+            for port_info in ports:
+                port = port_info.port  # SerialPortInfo is a dataclass, not a dict
+                # Skip COM1 (usually reserved/unused)
+                if port.upper() == 'COM1':
+                    continue
 
-            desc = port_info.description or ''
-            display_text = f"{port} - {desc}" if desc else port
-            item = QListWidgetItem(display_text)
-            item.setData(Qt.ItemDataRole.UserRole, port)
-            self.port_list.addItem(item)
+                desc = port_info.description or ''
+                display_text = f"{port} - {desc}" if desc else port
+                item = QListWidgetItem(display_text)
+                item.setData(Qt.ItemDataRole.UserRole, port)
+                self.port_list.addItem(item)
+        except Exception as e:
+            logger.error(f"Failed to scan COM ports: {e}")
 
         # Select "None" by default
         self.port_list.setCurrentRow(0)
@@ -2575,14 +2579,22 @@ class ExecutionTab(QWidget):
             self.status_display.append("Continuing without calibrator...")
 
         # Show session start dialog for COM port / input method selection
-        session_dialog = SessionStartDialog(self)
-        if session_dialog.exec() != QDialog.DialogCode.Accepted:
-            self.status_display.append("Session cancelled by user")
-            return
+        try:
+            session_dialog = SessionStartDialog(self)
+            result = session_dialog.exec()
+            if result != QDialog.DialogCode.Accepted:
+                self.status_display.append("Session cancelled by user")
+                return
 
-        # Store the selected input method and COM port
-        self._session_input_method = session_dialog.get_input_method()
-        self._session_com_port = session_dialog.get_selected_port()
+            # Store the selected input method and COM port
+            self._session_input_method = session_dialog.get_input_method()
+            self._session_com_port = session_dialog.get_selected_port()
+        except Exception as e:
+            logger.error(f"Session dialog error: {e}")
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(self, "Error", f"Session dialog failed:\n{e}")
+            return
 
         # Log the selection
         if self._session_com_port:
