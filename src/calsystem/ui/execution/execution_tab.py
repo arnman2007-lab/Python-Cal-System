@@ -2604,6 +2604,8 @@ class ExecutionTab(QWidget):
             return
 
         # Log the selection
+        self.status_display.append(f"[DEBUG] _session_input_method = {self._session_input_method}")
+        self.status_display.append(f"[DEBUG] _session_com_port = {self._session_com_port}")
         if self._session_com_port:
             self.status_display.append(f"DUT Serial Port: {self._session_com_port}")
             self.status_display.append("Input Mode: Remote Automation")
@@ -3748,6 +3750,10 @@ class ExecutionTab(QWidget):
 
         if self._send_calibrator_commands(final_cmd, operate_cmd):
             self.status_display.append("Output set - ready for reading")
+
+            # Debug: Show current input method
+            self.status_display.append(f"[DEBUG] Input method: {self._session_input_method}")
+            self.status_display.append(f"[DEBUG] Post-read cmd: {tp.get('dut_post_read_command')}")
 
             # DUT Post-Read: Automatically capture reading from DUT if configured
             if self._session_input_method == "remote":
