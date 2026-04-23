@@ -346,6 +346,8 @@ class DatabaseManager:
                         ('dut_pre_check_param', 'VARCHAR(100)'),
                         ('dut_pre_check_expected', 'VARCHAR(100)'),
                         ('dut_pre_check_prompt', 'VARCHAR(255)'),
+                        ('dut_pre_check_parser', 'VARCHAR(50)'),
+                        ('dut_pre_check_index', 'INTEGER'),
                         ('dut_post_read_command', 'VARCHAR(50)'),
                         ('dut_post_read_param', 'VARCHAR(100)'),
                         ('dut_post_read_parser', 'VARCHAR(50)'),
@@ -356,6 +358,14 @@ class DatabaseManager:
                             conn.execute(text(f"ALTER TABLE test_points ADD COLUMN {col_name} {col_type}"))
                             conn.commit()
                             logger.info(f"Added {col_name} column to test_points")
+
+                    # DUT command bank line_terminator column
+                    result = conn.execute(text("PRAGMA table_info(dut_command_banks)"))
+                    dcb_columns = [row[1] for row in result.fetchall()]
+                    if 'line_terminator' not in dcb_columns:
+                        conn.execute(text("ALTER TABLE dut_command_banks ADD COLUMN line_terminator VARCHAR(10) DEFAULT '\\r\\n'"))
+                        conn.commit()
+                        logger.info("Added line_terminator column to dut_command_banks")
 
                 else:
                     # MySQL migrations
@@ -602,6 +612,8 @@ class DatabaseManager:
                         ('dut_pre_check_param', 'VARCHAR(100)'),
                         ('dut_pre_check_expected', 'VARCHAR(100)'),
                         ('dut_pre_check_prompt', 'VARCHAR(255)'),
+                        ('dut_pre_check_parser', 'VARCHAR(50)'),
+                        ('dut_pre_check_index', 'INTEGER'),
                         ('dut_post_read_command', 'VARCHAR(50)'),
                         ('dut_post_read_param', 'VARCHAR(100)'),
                         ('dut_post_read_parser', 'VARCHAR(50)'),
@@ -616,6 +628,16 @@ class DatabaseManager:
                             conn.execute(text(f"ALTER TABLE test_points ADD COLUMN {col_name} {col_type}"))
                             conn.commit()
                             logger.info(f"Added {col_name} column to test_points")
+
+                    # DUT command bank line_terminator column
+                    result = conn.execute(text(
+                        "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                        "WHERE TABLE_NAME = 'dut_command_banks' AND COLUMN_NAME = 'line_terminator'"
+                    ))
+                    if not result.fetchone():
+                        conn.execute(text("ALTER TABLE dut_command_banks ADD COLUMN line_terminator VARCHAR(10) DEFAULT '\\r\\n'"))
+                        conn.commit()
+                        logger.info("Added line_terminator column to dut_command_banks")
 
         except Exception as e:
             logger.warning(f"Migration check: {e}")

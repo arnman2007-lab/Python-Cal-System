@@ -836,6 +836,7 @@ class ExecutionTab(QWidget):
         self._dut_com_port: Optional[str] = None
         self._dut_commands: Optional[Dict[str, Any]] = None
         self._dut_serial_config: Optional[Dict[str, Any]] = None
+        self._dut_line_terminator: str = "\r\n"  # Default, loaded from command bank
         self._dut_serial_connected: bool = False
         # Session input method (set by SessionStartDialog)
         self._session_input_method: str = "keyboard"  # keyboard, remote, ocr
@@ -1525,6 +1526,7 @@ class ExecutionTab(QWidget):
         self._dut_commands = None
         self._dut_serial_config = None
         self._dut_com_port = None
+        self._dut_line_terminator = "\r\n"  # Reset to default
 
         # Use COM port selected in session dialog (not from DUT record)
         if self._session_input_method == "remote" and self._session_com_port:
@@ -1555,10 +1557,16 @@ class ExecutionTab(QWidget):
                 if cmd_bank and cmd_bank.commands:
                     self._dut_commands = cmd_bank.commands
                     self._dut_serial_config = cmd_bank.serial_config
+
+                    # Load line terminator (convert escaped to actual chars)
+                    terminator_escaped = cmd_bank.line_terminator or "\\r\\n"
+                    self._dut_line_terminator = terminator_escaped.replace("\\r", "\r").replace("\\n", "\n")
+
                     cmd_list = list(self._dut_commands.keys())
-                    logger.info(f"Loaded DUT command bank for {dut.make} {dut.model}: {cmd_list}")
+                    terminator_display = terminator_escaped.replace("\\r", "CR").replace("\\n", "LF")
+                    logger.info(f"Loaded DUT command bank for {dut.make} {dut.model}: {cmd_list}, terminator: {terminator_display}")
                     self.status_display.append(f"DUT commands loaded: {', '.join(cmd_list)}")
-                    self.status_display.append(f"DUT COM port: {self._dut_com_port}")
+                    self.status_display.append(f"DUT COM port: {self._dut_com_port} (terminator: {terminator_display})")
 
                     # Try to connect to DUT serial port now
                     if self._connect_dut_serial():
@@ -1616,9 +1624,13 @@ class ExecutionTab(QWidget):
             else:
                 return {"command": str(cmd_info), "delay_before": 0, "delay_after": 0.1}
 
-        # Case-insensitive match
+        # Normalize for comparison: lowercase and remove spaces
+        name_normalized = command_name.lower().replace(" ", "")
+
+        # Case-insensitive and space-insensitive match
         for key, value in self._dut_commands.items():
-            if key.lower() == command_name.lower():
+            key_normalized = key.lower().replace(" ", "")
+            if key_normalized == name_normalized:
                 if isinstance(value, dict):
                     return value
                 else:
@@ -1662,6 +1674,7 @@ class ExecutionTab(QWidget):
             command,
             delay_before=delay_before,
             delay_after=delay_after,
+            terminator=self._dut_line_terminator,
         )
 
         if success:
@@ -1700,7 +1713,12 @@ class ExecutionTab(QWidget):
 
         self.status_display.append(f"DUT Command: {command}")
 
-        return serial_mgr.write(self._dut_com_port, command, delay_after=delay_after)
+        return serial_mgr.write(
+            self._dut_com_port,
+            command,
+            delay_after=delay_after,
+            terminator=self._dut_line_terminator
+        )
 
     def _execute_dut_setup(self, tp: Dict[str, Any]) -> bool:
         """
@@ -1747,6 +1765,11 @@ class ExecutionTab(QWidget):
         precheck_param = tp.get('dut_pre_check_param')  # Parameter for {value} substitution
         expected = tp.get('dut_pre_check_expected')
         precheck_prompt = tp.get('dut_pre_check_prompt')  # Custom message for tech if mismatch
+        precheck_parser = tp.get('dut_pre_check_parser', 'string')  # string or csv_field
+        precheck_index = tp.get('dut_pre_check_index', 1)  # For CSV, which field to compare
+
+        # Debug: show what's loaded from test point
+        self.status_display.append(f"[DEBUG] Pre-check: cmd={precheck_cmd}, expected={expected}, parser={precheck_parser}, index={precheck_index}")
 
         if not precheck_cmd or not expected:
             return True  # No pre-check configured
@@ -1779,24 +1802,49 @@ class ExecutionTab(QWidget):
             response_clean = response.strip()
             expected_clean = expected.strip()
 
+            # Parse response based on parser type
+            compare_value = response_clean
+            if precheck_parser == 'csv_field':
+                # Handle multi-line responses (some devices send status line before data)
+                # Extract the line containing commas (the actual CSV data line)
+                response_line = response_clean
+                if '\n' in response_clean:
+                    lines = [l.strip() for l in response_clean.split('\n') if l.strip()]
+                    # Find line with commas (CSV data), prefer last such line
+                    csv_lines = [l for l in lines if ',' in l]
+                    if csv_lines:
+                        response_line = csv_lines[-1]  # Use last CSV line
+                        self.status_display.append(f"[DEBUG] Multi-line response, using: '{response_line}'")
+                    else:
+                        response_line = lines[-1]  # Use last line if no CSV found
+
+                # Extract value from comma-separated response
+                # Example: "QS F,0" with index=1 → "0"
+                parts = response_line.split(',')
+                if precheck_index < len(parts):
+                    compare_value = parts[precheck_index].strip()
+                    self.status_display.append(f"[DEBUG] CSV field {precheck_index}: '{compare_value}' from '{response_line}'")
+                else:
+                    self.status_display.append(f"[DEBUG] CSV index {precheck_index} out of range for: '{response_line}'")
+
             # Try numeric comparison if both are numbers
             try:
-                if float(response_clean) == float(expected_clean):
-                    self.status_display.append(f"DUT state OK: {response_clean} == {expected_clean}")
+                if float(compare_value) == float(expected_clean):
+                    self.status_display.append(f"DUT state OK: {compare_value} == {expected_clean}")
                     return True
             except ValueError:
                 pass
 
             # String comparison (case-insensitive)
-            if response_clean.lower() == expected_clean.lower():
-                self.status_display.append(f"DUT state OK: {response_clean}")
+            if compare_value.lower() == expected_clean.lower():
+                self.status_display.append(f"DUT state OK: {compare_value}")
                 return True
 
-            # State mismatch - show dialog
+            # State mismatch - show dialog (show parsed value, not raw response)
             dialog = DUTStateMismatchDialog(
                 command_name=precheck_cmd,
                 expected=expected,
-                actual=response_clean,
+                actual=compare_value,
                 test_info=test_info,
                 prompt=precheck_prompt,
                 parent=self,
@@ -1835,9 +1883,21 @@ class ExecutionTab(QWidget):
 
         try:
             if parser == 'csv_field':
+                # Handle multi-line responses (some devices send status line before data)
+                response_line = response.strip()
+                if '\n' in response_line:
+                    lines = [l.strip() for l in response_line.split('\n') if l.strip()]
+                    # Find line with commas (CSV data), prefer last such line
+                    csv_lines = [l for l in lines if ',' in l]
+                    if csv_lines:
+                        response_line = csv_lines[-1]  # Use last CSV line
+                        self.status_display.append(f"Multi-line response, using: {response_line}")
+                    else:
+                        response_line = lines[-1]  # Use last line if no CSV found
+
                 # Extract value from comma-separated response
                 # Example: "QM,+0.000E+00,VDC,AUTO" with index=1 → "+0.000E+00"
-                fields = [f.strip() for f in response.split(',')]
+                fields = [f.strip() for f in response_line.split(',')]
                 if csv_index < len(fields):
                     value_str = fields[csv_index]
                     self.status_display.append(f"CSV field {csv_index}: {value_str}")
@@ -1848,9 +1908,17 @@ class ExecutionTab(QWidget):
                     self.status_display.append(f"CSV index {csv_index} out of range")
                     return None
             elif parser == 'numeric':
+                # Handle multi-line responses for numeric parser too
+                response_clean = response.strip()
+                if '\n' in response_clean:
+                    lines = [l.strip() for l in response_clean.split('\n') if l.strip()]
+                    csv_lines = [l for l in lines if ',' in l]
+                    if csv_lines:
+                        response_clean = csv_lines[-1]
+
                 # Extract first number from response
                 import re
-                match = re.search(r'-?\d+\.?\d*[eE]?[+-]?\d*', response)
+                match = re.search(r'-?\d+\.?\d*[eE]?[+-]?\d*', response_clean)
                 if match:
                     return float(match.group())
             elif parser == 'string':
@@ -3227,6 +3295,8 @@ class ExecutionTab(QWidget):
                         "dut_pre_check_param": tp.dut_pre_check_param,
                         "dut_pre_check_expected": tp.dut_pre_check_expected,
                         "dut_pre_check_prompt": tp.dut_pre_check_prompt,
+                        "dut_pre_check_parser": tp.dut_pre_check_parser,
+                        "dut_pre_check_index": tp.dut_pre_check_index,
                         "dut_post_read_command": tp.dut_post_read_command,
                         "dut_post_read_param": tp.dut_post_read_param,
                         "dut_post_read_parser": tp.dut_post_read_parser,
@@ -3664,16 +3734,17 @@ class ExecutionTab(QWidget):
         """Send output command to calibrator for the test point."""
         test_type = tp.get('test_type', 'measurement')
 
-        # DUT Setup Command: Send command to configure DUT before test
-        if tp.get('dut_setup_command'):
-            if not self._execute_dut_setup(tp):
-                # User cancelled or setup failed
-                return
-
-        # DUT Pre-Check: Verify DUT is in expected state before calibrator output
+        # DUT Pre-Check: Verify DUT is in expected state FIRST (before setup)
+        # This ensures tech sets knob position before we configure range
         if tp.get('dut_pre_check_command') and tp.get('dut_pre_check_expected'):
             if not self._execute_dut_precheck(tp):
                 # User cancelled or pre-check failed
+                return
+
+        # DUT Setup Command: Send command to configure DUT AFTER pre-check passes
+        if tp.get('dut_setup_command'):
+            if not self._execute_dut_setup(tp):
+                # User cancelled or setup failed
                 return
 
         # For Pass/Fail tests, check if we need to do pre-conditioning first

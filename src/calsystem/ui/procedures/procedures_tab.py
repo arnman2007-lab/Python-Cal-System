@@ -2152,6 +2152,27 @@ class ProceduresTab(QWidget):
         )
         dut_remote_layout.addRow("Prompt:", self.dut_precheck_prompt_input)
 
+        # Pre-check parser (for CSV responses)
+        precheck_parser_layout = QHBoxLayout()
+        self.dut_precheck_parser_combo = QComboBox()
+        self.dut_precheck_parser_combo.addItems(["string", "csv_field"])
+        self.dut_precheck_parser_combo.setToolTip(
+            "How to parse the DUT response:\n"
+            "- string: Compare full response\n"
+            "- csv_field: Extract value from comma-separated field"
+        )
+        precheck_parser_layout.addWidget(self.dut_precheck_parser_combo)
+
+        precheck_parser_layout.addWidget(QLabel("CSV Pos:"))
+        self.dut_precheck_index_spin = QSpinBox()
+        self.dut_precheck_index_spin.setRange(0, 10)
+        self.dut_precheck_index_spin.setValue(1)
+        self.dut_precheck_index_spin.setToolTip("Which CSV field to compare (0-based)")
+        self.dut_precheck_index_spin.setMaximumWidth(60)
+        precheck_parser_layout.addWidget(self.dut_precheck_index_spin)
+        precheck_parser_layout.addStretch()
+        dut_remote_layout.addRow("Parser:", precheck_parser_layout)
+
         dut_remote_layout.addRow(QLabel(""))  # Spacer
 
         # Post-Read Section
@@ -2283,6 +2304,8 @@ class ProceduresTab(QWidget):
         self.dut_precheck_param_input.textChanged.connect(self._update_flow_preview)
         self.dut_precheck_expected_input.textChanged.connect(self._update_flow_preview)
         self.dut_precheck_prompt_input.textChanged.connect(self._update_flow_preview)
+        self.dut_precheck_parser_combo.currentTextChanged.connect(self._update_flow_preview)
+        self.dut_precheck_index_spin.valueChanged.connect(self._update_flow_preview)
         self.dut_postread_cmd_combo.currentTextChanged.connect(self._update_flow_preview)
         self.dut_postread_param_input.textChanged.connect(self._update_flow_preview)
         self.dut_postread_parser_combo.currentTextChanged.connect(self._update_flow_preview)
@@ -2379,6 +2402,8 @@ class ProceduresTab(QWidget):
         self.dut_precheck_param_input.clear()
         self.dut_precheck_expected_input.clear()
         self.dut_precheck_prompt_input.clear()
+        self.dut_precheck_parser_combo.setCurrentIndex(0)
+        self.dut_precheck_index_spin.setValue(1)
         self.dut_postread_cmd_combo.setCurrentIndex(0)
         self.dut_postread_param_input.clear()
         self.dut_postread_parser_combo.setCurrentIndex(0)
@@ -2461,6 +2486,8 @@ class ProceduresTab(QWidget):
             "dut_pre_check_param": self.dut_precheck_param_input.text() or None,
             "dut_pre_check_expected": self.dut_precheck_expected_input.text() or None,
             "dut_pre_check_prompt": self.dut_precheck_prompt_input.text() or None,
+            "dut_pre_check_parser": self.dut_precheck_parser_combo.currentText() or None,
+            "dut_pre_check_index": self.dut_precheck_index_spin.value(),
             "dut_post_read_command": self.dut_postread_cmd_combo.currentText() or None,
             "dut_post_read_param": self.dut_postread_param_input.text() or None,
             "dut_post_read_parser": self.dut_postread_parser_combo.currentText() or None,
@@ -3948,6 +3975,20 @@ class ProceduresTab(QWidget):
                 self.dut_precheck_expected_input.setText(tp.dut_pre_check_expected or "")
                 self.dut_precheck_prompt_input.setText(tp.dut_pre_check_prompt or "")
 
+                # Pre-check parser
+                if tp.dut_pre_check_parser:
+                    idx = self.dut_precheck_parser_combo.findText(tp.dut_pre_check_parser)
+                    if idx >= 0:
+                        self.dut_precheck_parser_combo.setCurrentIndex(idx)
+                else:
+                    self.dut_precheck_parser_combo.setCurrentIndex(0)
+
+                # Pre-check CSV field index
+                if tp.dut_pre_check_index is not None:
+                    self.dut_precheck_index_spin.setValue(tp.dut_pre_check_index)
+                else:
+                    self.dut_precheck_index_spin.setValue(1)  # Default to position 1
+
                 if tp.dut_post_read_command:
                     idx = self.dut_postread_cmd_combo.findText(tp.dut_post_read_command)
                     if idx >= 0:
@@ -4170,6 +4211,10 @@ class ProceduresTab(QWidget):
                 tp.dut_pre_check_expected = precheck_expected if precheck_expected else None
                 precheck_prompt = self.dut_precheck_prompt_input.text().strip()
                 tp.dut_pre_check_prompt = precheck_prompt if precheck_prompt else None
+                precheck_parser = self.dut_precheck_parser_combo.currentText().strip()
+                tp.dut_pre_check_parser = precheck_parser if precheck_parser else None
+                # Pre-check CSV field index
+                tp.dut_pre_check_index = self.dut_precheck_index_spin.value()
                 postread_cmd = self.dut_postread_cmd_combo.currentText().strip()
                 tp.dut_post_read_command = postread_cmd if postread_cmd else None
                 postread_param = self.dut_postread_param_input.text().strip()
@@ -4213,6 +4258,9 @@ class ProceduresTab(QWidget):
                     current.setText(2, tol_spec.format_spec())
 
                 logger.info(f"Saved test point: {tp_id}")
+
+            # Auto-export to CSP to keep in sync
+            self._export_current_to_csp()
 
             # Show brief confirmation in status bar if available, or message box
             self.window().statusBar().showMessage("Test point saved", 2000)

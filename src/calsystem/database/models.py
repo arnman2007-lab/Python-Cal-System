@@ -569,6 +569,8 @@ class TestPoint(Base):
     dut_pre_check_param = Column(String(100), nullable=True, comment="Parameter value to substitute into pre-check command {value}")
     dut_pre_check_expected = Column(String(100), nullable=True, comment="Expected response pattern/value")
     dut_pre_check_prompt = Column(String(255), nullable=True, comment="Custom message to show tech if state mismatch (e.g., Turn knob to DC Volts)")
+    dut_pre_check_parser = Column(String(50), nullable=True, comment="Parser type: csv_field, string")
+    dut_pre_check_index = Column(Integer, nullable=True, comment="For CSV responses, which field to compare (0-based index)")
     # Post-read - read measurement from DUT after calibrator output
     dut_post_read_command = Column(String(50), nullable=True, comment="DUT command ref for post-read (e.g., Read Value)")
     dut_post_read_param = Column(String(100), nullable=True, comment="Parameter value to substitute into post-read command {value}")
@@ -814,6 +816,9 @@ class DUTCommandBank(Base):
 
     # Serial port settings (JSON): {baud_rate, data_bits, parity, stop_bits, timeout}
     serial_config = Column(JSON, nullable=True, comment="Serial port configuration")
+
+    # Line terminator for commands (default \r\n, but some devices like Fluke 789 need just \r)
+    line_terminator = Column(String(10), default="\\r\\n", comment="Line terminator: \\r\\n, \\r, or \\n")
 
     # Commands stored as JSON
     # Format: {"QUERY_POSITION": {"command": "QP", "delay_before": 0, "delay_after": 0.1}, ...}

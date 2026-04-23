@@ -256,6 +256,20 @@ def _convert_test_point(tp: TestPoint) -> TestPointData:
         excel_workbook=tp.excel_workbook,
         excel_sheet=tp.excel_sheet,
         excel_cell=tp.excel_cell,
+
+        # DUT Remote Communication
+        dut_setup_command=getattr(tp, 'dut_setup_command', None),
+        dut_setup_param=getattr(tp, 'dut_setup_param', None),
+        dut_pre_check_command=getattr(tp, 'dut_pre_check_command', None),
+        dut_pre_check_param=getattr(tp, 'dut_pre_check_param', None),
+        dut_pre_check_expected=getattr(tp, 'dut_pre_check_expected', None),
+        dut_pre_check_prompt=getattr(tp, 'dut_pre_check_prompt', None),
+        dut_pre_check_parser=getattr(tp, 'dut_pre_check_parser', None),
+        dut_pre_check_index=getattr(tp, 'dut_pre_check_index', None),
+        dut_post_read_command=getattr(tp, 'dut_post_read_command', None),
+        dut_post_read_param=getattr(tp, 'dut_post_read_param', None),
+        dut_post_read_parser=getattr(tp, 'dut_post_read_parser', None),
+        dut_post_read_index=getattr(tp, 'dut_post_read_index', None),
     )
 
 

@@ -291,6 +291,18 @@ class RemoteTab(QWidget):
         self.serial_config_label.setStyleSheet("color: gray;")
         serial_layout.addRow("Format:", self.serial_config_label)
 
+        # Line terminator dropdown
+        self.line_terminator_combo = QComboBox()
+        self.line_terminator_combo.addItem("CR+LF (\\r\\n)", "\\r\\n")
+        self.line_terminator_combo.addItem("CR only (\\r)", "\\r")
+        self.line_terminator_combo.addItem("LF only (\\n)", "\\n")
+        self.line_terminator_combo.setToolTip(
+            "Line terminator sent after each command.\n"
+            "Most devices use CR+LF, but some (like Fluke 789)\n"
+            "need CR only to avoid extra responses."
+        )
+        serial_layout.addRow("Line Terminator:", self.line_terminator_combo)
+
         editor_layout.addWidget(self.serial_config_group)
 
         # Commands table
@@ -476,11 +488,16 @@ class RemoteTab(QWidget):
                 self.cmd_response_text.setText(f"Failed to connect to {port}")
                 return
 
-        # Send command and get response
-        success, response = serial_mgr.query(port, command, delay_after=0.2)
+        # Get line terminator from command bank editor (convert escaped to actual chars)
+        terminator_escaped = self.line_terminator_combo.currentData() or "\\r\\n"
+        terminator = terminator_escaped.replace("\\r", "\r").replace("\\n", "\n")
+
+        # Send command and get response with configured terminator
+        success, response = serial_mgr.query(port, command, delay_after=0.2, terminator=terminator)
 
         if success:
-            self.cmd_response_text.setText(f"Command: {command}\nResponse: {response}")
+            terminator_display = self.line_terminator_combo.currentText()
+            self.cmd_response_text.setText(f"Command: {command}\nTerminator: {terminator_display}\nResponse: {response}")
         else:
             self.cmd_response_text.setText(f"Command failed: {command}\nNo response received")
 
@@ -672,6 +689,14 @@ class RemoteTab(QWidget):
                     if idx >= 0:
                         self.serial_baud_combo.setCurrentIndex(idx)
 
+                # Line terminator
+                terminator = bank.line_terminator or "\\r\\n"
+                idx = self.line_terminator_combo.findData(terminator)
+                if idx >= 0:
+                    self.line_terminator_combo.setCurrentIndex(idx)
+                else:
+                    self.line_terminator_combo.setCurrentIndex(0)  # Default to CR+LF
+
                 # Commands
                 self._load_commands_into_table(bank.commands or {})
 
@@ -719,6 +744,7 @@ class RemoteTab(QWidget):
         self.bank_description_input.clear()
         self.comm_type_combo.setCurrentIndex(0)
         self.serial_baud_combo.setCurrentIndex(0)
+        self.line_terminator_combo.setCurrentIndex(0)  # Default to CR+LF
         self.commands_table.setRowCount(0)
         self.bank_table.clearSelection()
         self.delete_bank_btn.setEnabled(False)
@@ -875,6 +901,9 @@ class RemoteTab(QWidget):
             "stop_bits": 1,
         }
 
+        # Line terminator
+        line_terminator = self.line_terminator_combo.currentData() or "\\r\\n"
+
         db = get_db()
         if not db.is_connected:
             QMessageBox.warning(self, "Database Error", "Not connected to database.")
@@ -894,6 +923,7 @@ class RemoteTab(QWidget):
                         bank.communication_type = self.comm_type_combo.currentText()
                         bank.serial_config = serial_config
                         bank.commands = commands
+                        bank.line_terminator = line_terminator
                 else:
                     # Check for duplicate
                     existing = session.query(DUTCommandBank).filter(
@@ -913,6 +943,7 @@ class RemoteTab(QWidget):
                             existing.communication_type = self.comm_type_combo.currentText()
                             existing.serial_config = serial_config
                             existing.commands = commands
+                            existing.line_terminator = line_terminator
                             self._current_bank_id = existing.id
                         else:
                             return
@@ -925,6 +956,7 @@ class RemoteTab(QWidget):
                             communication_type=self.comm_type_combo.currentText(),
                             serial_config=serial_config,
                             commands=commands,
+                            line_terminator=line_terminator,
                         )
                         session.add(bank)
                         session.flush()

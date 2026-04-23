@@ -91,6 +91,8 @@ class TestPointData:
     dut_pre_check_param: Optional[str] = None  # Parameter value to substitute into command {value}
     dut_pre_check_expected: Optional[str] = None
     dut_pre_check_prompt: Optional[str] = None  # Custom message for tech if mismatch
+    dut_pre_check_parser: Optional[str] = None  # Parser type: csv_field, string
+    dut_pre_check_index: Optional[int] = None  # For CSV responses, which field to compare (0-based)
     # Post-read - read measurement from DUT
     dut_post_read_command: Optional[str] = None
     dut_post_read_param: Optional[str] = None  # Parameter value to substitute into command {value}
@@ -148,6 +150,8 @@ class TestPointData:
             "dut_pre_check_param": self.dut_pre_check_param,
             "dut_pre_check_expected": self.dut_pre_check_expected,
             "dut_pre_check_prompt": self.dut_pre_check_prompt,
+            "dut_pre_check_parser": self.dut_pre_check_parser,
+            "dut_pre_check_index": self.dut_pre_check_index,
             "dut_post_read_command": self.dut_post_read_command,
             "dut_post_read_param": self.dut_post_read_param,
             "dut_post_read_parser": self.dut_post_read_parser,
@@ -206,6 +210,8 @@ class TestPointData:
             dut_pre_check_param=data.get("dut_pre_check_param"),
             dut_pre_check_expected=data.get("dut_pre_check_expected"),
             dut_pre_check_prompt=data.get("dut_pre_check_prompt"),
+            dut_pre_check_parser=data.get("dut_pre_check_parser"),
+            dut_pre_check_index=data.get("dut_pre_check_index"),
             dut_post_read_command=data.get("dut_post_read_command"),
             dut_post_read_param=data.get("dut_post_read_param"),
             dut_post_read_parser=data.get("dut_post_read_parser"),
