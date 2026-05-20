@@ -271,11 +271,11 @@ class SessionStartDialog(QDialog):
 class PassFailDialog(QDialog):
     """Dialog for Pass/Fail test point verification."""
 
-    def __init__(self, prompt: str, test_info: str, parent=None):
+    def __init__(self, prompt: str, test_info: str, operator_prompt: Optional[str] = None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Pass/Fail Verification")
         self.setModal(True)
-        self.setMinimumWidth(400)
+        self.setMinimumWidth(450)
 
         self._result: Optional[bool] = None
 
@@ -288,6 +288,20 @@ class PassFailDialog(QDialog):
         layout.addWidget(info_label)
 
         layout.addSpacing(10)
+
+        # Operator instructions (if provided)
+        if operator_prompt:
+            op_label = QLabel(operator_prompt)
+            op_label.setStyleSheet("font-size: 13px; color: #333;")
+            op_label.setWordWrap(True)
+            layout.addWidget(op_label)
+            layout.addSpacing(10)
+
+            # Separator line
+            separator = QLabel("━" * 60)
+            separator.setStyleSheet("color: #ccc;")
+            layout.addWidget(separator)
+            layout.addSpacing(10)
 
         # Prompt message
         prompt_label = QLabel(prompt or "Does this test point pass?")
@@ -3506,10 +3520,12 @@ class ExecutionTab(QWidget):
                         return
 
             # Check for test point-specific instructions (prompt and/or wiring)
+            # Skip this for pass_fail tests since the Pass/Fail dialog will show all the info
+            test_type = tp.get('test_type', 'measurement')
             tp_wiring_type = tp.get('wiring_diagram_type')
             operator_prompt = tp.get('operator_prompt')
 
-            if operator_prompt or tp_wiring_type:
+            if (operator_prompt or tp_wiring_type) and test_type != 'pass_fail':
                 # Load test point-specific wiring diagram if specified
                 if tp_wiring_type:
                     self._load_testpoint_wiring_diagram(tp_wiring_type)
@@ -4387,11 +4403,15 @@ class ExecutionTab(QWidget):
         """
         prompt = tp.get('pass_fail_prompt') or "Wire the DUT to the DMM as shown."
 
-        # Build test info string
-        nominal_str = f"{tp.get('nominal_value', '')} {tp.get('unit', '')}"
-        if tp.get('frequency'):
-            nominal_str += f" @ {tp['frequency']} {tp.get('frequency_unit', 'Hz')}"
-        test_info = f"{tp.get('section_name', '')} - {tp.get('description', nominal_str)}"
+        # Build test info string - for Pass/Fail, use description or operator prompt, NOT nominal value
+        description = tp.get('description', '').strip()
+        if not description:
+            # If no description, use the operator prompt or a generic label
+            operator_prompt_text = tp.get('operator_prompt', '').strip()
+            description = operator_prompt_text if operator_prompt_text else "Pass/Fail Check"
+        test_info = f"{tp.get('section_name', '')}"
+        if description:
+            test_info += f" - {description}"
 
         # Get limits and comparison type
         min_val = tp.get('pass_fail_min')
@@ -4409,7 +4429,8 @@ class ExecutionTab(QWidget):
         if not has_limits:
             # No limits - simple manual Pass/Fail (no DMM needed)
             self.status_display.append(f"Pass/Fail Test (Manual): {prompt}")
-            dialog = PassFailDialog(prompt, test_info, self)
+            operator_prompt = tp.get('operator_prompt')
+            dialog = PassFailDialog(prompt, test_info, operator_prompt, self)
             dialog.exec()
             result = dialog.get_result()
 
