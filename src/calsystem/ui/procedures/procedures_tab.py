@@ -3011,11 +3011,11 @@ class ProceduresTab(QWidget):
             return
 
         # Show section edit dialog
-        dialog = SectionEditDialog("New Section", "", self)
+        dialog = SectionEditDialog("New Section", "", "", parent=self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
 
-        name, standard_type = dialog.get_values()
+        name, standard_type, section_command = dialog.get_values()
 
         db = get_db()
         if not db.is_connected:
@@ -3028,16 +3028,12 @@ class ProceduresTab(QWidget):
                     TestSection.procedure_id == self._current_procedure_id
                 ).count()
 
-                # Default section commands for all new sections
-                import json
-                default_commands = json.dumps(["Reset", "Standby"])
-
                 section = TestSection(
                     procedure_id=self._current_procedure_id,
                     name=name,
                     standard_section_type=standard_type or None,
                     order=max_order,
-                    section_command=default_commands,
+                    section_command=section_command or None,
                 )
                 session.add(section)
                 session.flush()
