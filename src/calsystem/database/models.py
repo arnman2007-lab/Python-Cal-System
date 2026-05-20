@@ -506,6 +506,7 @@ class TestPoint(Base):
 
     # Pass/Fail prompt (for subjective tests like beeper check)
     pass_fail_prompt = Column(Text, nullable=True, comment="Prompt shown to tech for Pass/Fail tests")
+    pass_fail_image = Column(String(255), nullable=True, comment="Optional reference image name from wiring diagram library")
     # Pass/Fail range check (for DMM value checks in Pass/Fail tests)
     pass_fail_min = Column(Float, nullable=True, comment="Minimum value for Pass/Fail range check")
     pass_fail_max = Column(Float, nullable=True, comment="Maximum value for Pass/Fail range check")

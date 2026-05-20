@@ -37,6 +37,7 @@ from PyQt6.QtWidgets import (
     QScrollArea,
     QStackedWidget,
     QCheckBox,
+    QInputDialog,
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QPixmap, QImage
@@ -1903,6 +1904,32 @@ class ProceduresTab(QWidget):
 
         prompt_layout.addWidget(prompt_group)
 
+        # Image section (optional)
+        image_group = QGroupBox("Reference Image (Optional)")
+        image_layout = QFormLayout(image_group)
+
+        image_help = QLabel("Add a reference image to show alongside the prompt")
+        image_help.setStyleSheet("color: gray; font-size: 10px;")
+        image_layout.addRow(image_help)
+
+        image_select_layout = QHBoxLayout()
+        self.pass_fail_image_input = QLineEdit()
+        self.pass_fail_image_input.setPlaceholderText("No image selected")
+        self.pass_fail_image_input.setReadOnly(True)
+        image_select_layout.addWidget(self.pass_fail_image_input)
+
+        self.pass_fail_image_btn = QPushButton("Select Image...")
+        self.pass_fail_image_btn.clicked.connect(self._select_pass_fail_image)
+        image_select_layout.addWidget(self.pass_fail_image_btn)
+
+        self.pass_fail_image_clear_btn = QPushButton("Clear")
+        self.pass_fail_image_clear_btn.clicked.connect(lambda: self.pass_fail_image_input.clear())
+        image_select_layout.addWidget(self.pass_fail_image_clear_btn)
+
+        image_layout.addRow("Image:", image_select_layout)
+
+        prompt_layout.addWidget(image_group)
+
         # Value check section (for DMM value checks)
         check_group = QGroupBox("Value Check (Optional)")
         check_layout = QVBoxLayout(check_group)
@@ -2360,6 +2387,7 @@ class ProceduresTab(QWidget):
         self.frequency_input.setValue(0)
         self.tolerance_input.setValue(0)
         self.pass_fail_prompt_input.clear()
+        self.pass_fail_image_input.clear()
         self.operational_check_input.clear()
         # Pass/Fail value check fields
         self.pass_fail_check_tabs.setCurrentIndex(0)  # Default to Range tab
@@ -2472,6 +2500,7 @@ class ProceduresTab(QWidget):
             # Pass/Fail
             "operator_prompt": self.operator_prompt_edit.toPlainText() or None,
             "pass_fail_prompt": self.pass_fail_prompt_input.toPlainText() if hasattr(self, 'pass_fail_prompt_input') else None,
+            "pass_fail_image": self.pass_fail_image_input.text() if hasattr(self, 'pass_fail_image_input') else None,
             "pass_fail_min": self.pass_fail_min_input.value() if self.pass_fail_min_input.value() > self.pass_fail_min_input.minimum() else None,
             "pass_fail_max": self.pass_fail_max_input.value() if self.pass_fail_max_input.value() > self.pass_fail_max_input.minimum() else None,
             "pass_fail_comparison_type": ["range", "gt", "lt"][self.pass_fail_check_tabs.currentIndex()] if hasattr(self, 'pass_fail_check_tabs') else "range",
@@ -3477,6 +3506,52 @@ class ProceduresTab(QWidget):
             for cmd in default_commands:
                 self.section_cmd_list.addItem(cmd)
 
+    def _select_pass_fail_image(self):
+        """Select an image from the wiring diagram library for Pass/Fail test."""
+        from calsystem.database.models import WiringDiagramLibrary
+
+        db = get_db()
+        if not db.is_connected:
+            QMessageBox.warning(self, "Database Error", "Not connected to database.")
+            return
+
+        try:
+            with db.session() as session:
+                # Get all unique diagram names from library
+                diagrams = session.query(WiringDiagramLibrary).distinct(
+                    WiringDiagramLibrary.diagram_name
+                ).all()
+
+                if not diagrams:
+                    QMessageBox.information(
+                        self,
+                        "No Images",
+                        "No images found in wiring diagram library.\n\n"
+                        "Add wiring diagrams in the Library tab first."
+                    )
+                    return
+
+                # Create list of diagram names
+                diagram_names = sorted(set(d.diagram_name for d in diagrams if d.diagram_name))
+
+                # Show selection dialog
+                name, ok = QInputDialog.getItem(
+                    self,
+                    "Select Image",
+                    "Choose an image from the library:",
+                    diagram_names,
+                    0,
+                    False
+                )
+
+                if ok and name:
+                    self.pass_fail_image_input.setText(name)
+                    logger.info(f"Selected Pass/Fail image: {name}")
+
+        except Exception as e:
+            logger.error(f"Failed to load images from library: {e}")
+            QMessageBox.critical(self, "Error", f"Failed to load images: {e}")
+
     def _save_current_section(self):
         """Save the current section details from the form."""
         if not self._current_section_id:
@@ -3854,6 +3929,7 @@ class ProceduresTab(QWidget):
 
                 # Pass/Fail prompt and value check
                 self.pass_fail_prompt_input.setText(tp.pass_fail_prompt or "")
+                self.pass_fail_image_input.setText(tp.pass_fail_image or "")
 
                 # Reset all value check inputs
                 self.pass_fail_min_input.setValue(self.pass_fail_min_input.minimum())
@@ -4087,6 +4163,7 @@ class ProceduresTab(QWidget):
 
                 # Pass/Fail prompt and value check
                 tp.pass_fail_prompt = self.pass_fail_prompt_input.toPlainText().strip() or None
+                tp.pass_fail_image = self.pass_fail_image_input.text().strip() or None
 
                 # Determine comparison type and save values based on selected tab
                 current_tab = self.pass_fail_check_tabs.currentIndex()

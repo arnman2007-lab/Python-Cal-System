@@ -271,7 +271,8 @@ class SessionStartDialog(QDialog):
 class PassFailDialog(QDialog):
     """Dialog for Pass/Fail test point verification."""
 
-    def __init__(self, prompt: str, test_info: str, operator_prompt: Optional[str] = None, parent=None):
+    def __init__(self, prompt: str, test_info: str, operator_prompt: Optional[str] = None,
+                 image_name: Optional[str] = None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Pass/Fail Verification")
         self.setModal(True)
@@ -302,6 +303,17 @@ class PassFailDialog(QDialog):
             separator.setStyleSheet("color: #ccc;")
             layout.addWidget(separator)
             layout.addSpacing(10)
+
+        # Reference image (if provided)
+        if image_name:
+            image_pixmap = self._load_image_from_library(image_name)
+            if image_pixmap:
+                image_label = QLabel()
+                image_label.setPixmap(image_pixmap)
+                image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                image_label.setStyleSheet("border: 1px solid #ccc; padding: 5px;")
+                layout.addWidget(image_label)
+                layout.addSpacing(10)
 
         # Prompt message
         prompt_label = QLabel(prompt or "Does this test point pass?")
@@ -352,6 +364,35 @@ class PassFailDialog(QDialog):
         button_layout.addWidget(self.pass_btn)
 
         layout.addLayout(button_layout)
+
+    def _load_image_from_library(self, diagram_name: str) -> Optional[QPixmap]:
+        """Load image from wiring diagram library by name."""
+        from calsystem.database.models import WiringDiagramLibrary
+        from calsystem.database.connection import get_db
+
+        db = get_db()
+        if not db.is_connected:
+            return None
+
+        try:
+            with db.session() as session:
+                diagram = session.query(WiringDiagramLibrary).filter(
+                    WiringDiagramLibrary.diagram_name == diagram_name
+                ).first()
+
+                if diagram and diagram.image_data:
+                    # Convert binary image data to QPixmap
+                    image = QImage.fromData(diagram.image_data)
+                    if not image.isNull():
+                        pixmap = QPixmap.fromImage(image)
+                        # Scale image to fit dialog (max 400px wide)
+                        if pixmap.width() > 400:
+                            pixmap = pixmap.scaledToWidth(400, Qt.TransformationMode.SmoothTransformation)
+                        return pixmap
+        except Exception as e:
+            logger.error(f"Failed to load image from library: {e}")
+
+        return None
 
     def _on_pass(self):
         self._result = True
@@ -2958,6 +2999,7 @@ class ExecutionTab(QWidget):
                             "measure_command": tp.measure_command,
                             "test_type": tp.test_type.value if tp.test_type else "measurement",
                             "pass_fail_prompt": tp.pass_fail_prompt,
+                            "pass_fail_image": tp.pass_fail_image,
                             "operator_prompt": tp.operator_prompt,
                             "pre_nominal_value": tp.pre_nominal_value,
                             "pre_unit": tp.pre_unit,
@@ -3136,6 +3178,7 @@ class ExecutionTab(QWidget):
                             "measure_command": tp.measure_command,
                             "test_type": tp.test_type.value if tp.test_type else "measurement",
                             "pass_fail_prompt": tp.pass_fail_prompt,
+                            "pass_fail_image": tp.pass_fail_image,
                             "operator_prompt": tp.operator_prompt,
                             # Pre-conditioning
                             "pre_nominal_value": tp.pre_nominal_value,
@@ -4430,7 +4473,8 @@ class ExecutionTab(QWidget):
             # No limits - simple manual Pass/Fail (no DMM needed)
             self.status_display.append(f"Pass/Fail Test (Manual): {prompt}")
             operator_prompt = tp.get('operator_prompt')
-            dialog = PassFailDialog(prompt, test_info, operator_prompt, self)
+            image_name = tp.get('pass_fail_image')
+            dialog = PassFailDialog(prompt, test_info, operator_prompt, image_name, self)
             dialog.exec()
             result = dialog.get_result()
 
