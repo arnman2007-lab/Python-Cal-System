@@ -3520,6 +3520,13 @@ class ProceduresTab(QWidget):
                 current.setText(0, display_text)
                 self.structure_tree.blockSignals(False)
 
+            # Refresh flow preview if a test point is selected (section changes affect flow)
+            current_item = self.structure_tree.currentItem()
+            if current_item:
+                data = current_item.data(0, Qt.ItemDataRole.UserRole)
+                if data and data[0] == "testpoint":
+                    self._update_flow_preview()
+
             QMessageBox.information(self, "Saved", "Section saved successfully.")
 
         except Exception as e:
@@ -4257,6 +4264,9 @@ class ProceduresTab(QWidget):
 
             # Auto-export to CSP to keep in sync
             self._export_current_to_csp()
+
+            # Refresh flow preview to ensure it reflects saved changes
+            self._update_flow_preview()
 
             # Show brief confirmation in status bar if available, or message box
             self.window().statusBar().showMessage("Test point saved", 2000)
