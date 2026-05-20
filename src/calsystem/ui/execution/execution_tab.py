@@ -4446,15 +4446,10 @@ class ExecutionTab(QWidget):
         """
         prompt = tp.get('pass_fail_prompt') or "Wire the DUT to the DMM as shown."
 
-        # Build test info string - for Pass/Fail, use description or operator prompt, NOT nominal value
-        description = tp.get('description', '').strip()
-        if not description:
-            # If no description, use the operator prompt or a generic label
-            operator_prompt_text = tp.get('operator_prompt', '').strip()
-            description = operator_prompt_text if operator_prompt_text else "Pass/Fail Check"
+        # Build test info string - for Pass/Fail, just use section name
+        # Don't include test point description as it's often just nominal value (e.g., "0.0V")
+        # which isn't relevant for Pass/Fail checks
         test_info = f"{tp.get('section_name', '')}"
-        if description:
-            test_info += f" - {description}"
 
         # Get limits and comparison type
         min_val = tp.get('pass_fail_min')
