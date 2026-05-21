@@ -240,24 +240,35 @@ class FlowPreviewWidget(QWidget):
             self._add_step("dut_precheck", "DUT State Check", detail)
             steps_added += 1
 
-        # 6. Source command (calibrator output)
-        source_cmd = test_point_data.get("source_command")
-        if source_cmd or test_type in ["measurement", "pass_fail", "calibrator_dmm"]:
+        # 6. Source command (calibrator output) OR manual setup
+        manual_setup = test_point_data.get("manual_setup", False)
+
+        if manual_setup:
+            # Show manual setup instead of calibrator output
             if steps_added > 0:
                 self._add_arrow()
-            nominal = test_point_data.get("nominal_value", 0)
-            unit = test_point_data.get("unit", "")
-            freq = test_point_data.get("frequency")
-
-            if source_cmd:
-                detail = source_cmd
-            else:
-                detail = f"Output: {nominal} {unit}"
-                if freq:
-                    detail += f" @ {freq} Hz"
-
-            self._add_step("source", "Calibrator Output", detail)
+            manual_prompt = test_point_data.get("manual_setup_prompt") or "Perform manual setup"
+            self._add_step("manual", "Manual Setup", manual_prompt)
             steps_added += 1
+        else:
+            # Normal calibrator output
+            source_cmd = test_point_data.get("source_command")
+            if source_cmd or test_type in ["measurement", "pass_fail", "calibrator_dmm"]:
+                if steps_added > 0:
+                    self._add_arrow()
+                nominal = test_point_data.get("nominal_value", 0)
+                unit = test_point_data.get("unit", "")
+                freq = test_point_data.get("frequency")
+
+                if source_cmd:
+                    detail = source_cmd
+                else:
+                    detail = f"Output: {nominal} {unit}"
+                    if freq:
+                        detail += f" @ {freq} Hz"
+
+                self._add_step("source", "Calibrator Output", detail)
+                steps_added += 1
 
         # 7. Operate command
         operate_cmd = test_point_data.get("operate_command")
