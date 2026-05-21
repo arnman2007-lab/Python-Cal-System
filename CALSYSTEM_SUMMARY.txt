@@ -1,0 +1,214 @@
+================================================================================
+CALSYSTEM MVP - PROJECT SUMMARY & CONTINUATION GUIDE
+================================================================================
+
+GitHub Repository: https://github.com/arnman2007-lab/Python-Cal-System
+Branch: ralph/calsystem-mvp
+
+================================================================================
+PROJECT FILE STRUCTURE
+================================================================================
+
+Calsystem/
+├── src/calsystem/
+│   ├── __init__.py
+│   ├── app.py                    # Main application window (QMainWindow)
+│   ├── main.py                   # Entry point
+│   │
+│   ├── config/
+│   │   ├── __init__.py
+│   │   └── settings.py           # Pydantic settings, loads from ~/.calsystem/config.json
+│   │
+│   ├── database/
+│   │   ├── __init__.py
+│   │   ├── connection.py         # DatabaseManager singleton (SQLAlchemy + MySQL)
+│   │   └── models.py             # All 11 database tables (Standard, DUT, Procedure, etc.)
+│   │
+│   ├── instruments/
+│   │   ├── __init__.py
+│   │   ├── command_bank.py       # CommandBankManager for SCPI commands
+│   │   ├── known_instruments.py  # Pre-defined instrument library
+│   │   └── visa_manager.py       # PyVISA wrapper for GPIB/USB instruments
+│   │
+│   ├── ocr/
+│   │   ├── __init__.py
+│   │   ├── reader.py             # OCRReader & SevenSegmentReader (Tesseract)
+│   │   └── webcam.py             # WebcamCapture for display reading
+│   │
+│   ├── reports/
+│   │   ├── __init__.py
+│   │   ├── excel_export.py       # ExcelExporter (openpyxl)
+│   │   └── pdf_generator.py      # PDFReportGenerator (reportlab)
+│   │
+│   └── ui/
+│       ├── __init__.py
+│       ├── dialogs/
+│       │   ├── add_standard_dialog.py
+│       │   ├── command_bank_dialog.py
+│       │   ├── excel_import_dialog.py
+│       │   ├── log_viewer_dialog.py
+│       │   ├── preferences_dialog.py
+│       │   └── settings_dialog.py
+│       ├── dut/
+│       │   └── dut_tab.py        # Device Under Test management
+│       ├── execution/
+│       │   └── execution_tab.py  # Calibration session execution
+│       ├── procedures/
+│       │   └── procedures_tab.py # Procedure builder
+│       ├── reports/
+│       │   └── reports_tab.py    # Session history & report generation
+│       ├── widgets/
+│       │   └── __init__.py
+│       └── workstation/
+│           └── workstation_tab.py # Instrument scanning & standards
+│
+├── prd.json                      # Product requirements (38 user stories)
+├── progress.txt                  # Development log & patterns
+├── CLAUDE.md                     # Ralph agent instructions
+├── pyproject.toml                # Python project config
+└── requirements.txt              # Dependencies
+
+================================================================================
+CURRENT FEATURES (All 38 User Stories Complete)
+================================================================================
+
+1. WORKSTATION TAB
+------------------
+- VISA instrument scanning (GPIB/USB/COM via PyVISA)
+- Add detected instruments as workstation standards
+- Manage standards by group (Calibrator, DMM, Counter, Other)
+- Save/load workstation configurations
+- Command bank management with SCPI templates
+- Warning icons for standards missing command banks
+
+2. DUT TAB (Device Under Test)
+------------------------------
+- Add/edit DUTs with auto-generated asset numbers (Model-Serial)
+- Search DUTs by asset number, make, model, serial
+- Calibration due date tracking with color coding:
+  - Red = Overdue
+  - Yellow = Due within 7 days
+  - Green = More than 7 days
+- Filter by: Overdue, Due This Week, Due This Month, All
+- Assign default calibration procedures to DUTs
+- View calibration history per DUT
+
+3. PROCEDURES TAB
+-----------------
+- Create calibration procedures with sections and test points
+- Test point fields: Type, Nominal, Unit, Frequency, Tolerance
+- Configure SCPI commands with placeholders: {value}, {unit}, {frequency}
+- Import test points from Excel (3-step wizard)
+- Add wiring diagrams to sections
+- Drag/drop reordering
+
+4. EXECUTION TAB
+----------------
+- Start calibration sessions (DUT + Procedure + Work Order)
+- Three input methods:
+  - Keyboard Entry - Manual reading input
+  - Remote Reading - Query DUT via VISA
+  - Webcam OCR - Capture display with camera
+- Pass/fail tolerance calculation (%, absolute, ppm)
+- Failed test dialog with Retry/Ignore/Abort options
+- Pause/resume sessions
+- Auto-advances to next test point
+- Updates DUT calibration dates on completion
+
+5. REPORTS TAB
+--------------
+- Search sessions by Asset, Work Order, Date Range
+- View full test results for any session
+- Generate PDF calibration certificates
+- Export results to Excel
+- Color-coded pass/fail results
+
+6. SETTINGS & PREFERENCES
+-------------------------
+- Database connection configuration (MySQL)
+- User preferences: Technician name, default input method
+- Webcam device selection
+- Application log viewer
+
+================================================================================
+FEATURE WALKTHROUGH
+================================================================================
+
+STARTING THE APP:
+1. Run `python -m calsystem` or the built executable
+2. First run: Go to File > Settings to configure MySQL connection
+3. Click "Test Connection" then "Save"
+4. Status bar shows "Database: Connected"
+
+SETTING UP A WORKSTATION:
+1. Go to Workstation tab
+2. Click "Scan" to detect GPIB/USB instruments
+3. Select detected instrument -> "Add to Standards"
+4. Fill in STD ID and Group -> Save
+5. Save configuration with "Save As"
+
+CREATING A PROCEDURE:
+1. Go to Procedures tab
+2. Click "New Procedure" -> Enter name, target make/model
+3. "Add Section" to create test groups
+4. Select section -> "Add Test Point"
+5. Fill in nominal, tolerance, commands
+6. Or use "Import from Excel" for bulk import
+
+RUNNING A CALIBRATION:
+1. Go to Execution tab
+2. Select DUT (auto-selects assigned procedure)
+3. Enter Work Order number
+4. Click "Start Session"
+5. Enter readings for each test point
+6. System calculates pass/fail automatically
+7. On completion, generates report option appears
+
+GENERATING REPORTS:
+1. Go to Reports tab
+2. Search for session by asset or work order
+3. Select session from results
+4. Click "Generate PDF" or "Export Excel"
+
+================================================================================
+PROMPT FOR CONTINUING DEVELOPMENT
+================================================================================
+
+Copy this to give to Claude when you continue:
+
+---START PROMPT---
+
+I'm working on Calsystem, a MetCal-like calibration management system.
+
+**Repository:** https://github.com/arnman2007-lab/Python-Cal-System
+**Branch:** ralph/calsystem-mvp
+
+**Tech Stack:**
+- Python 3.10+, PyQt6 for UI
+- SQLAlchemy + MySQL for database
+- PyVISA for GPIB/USB instrument control
+- Tesseract OCR for display reading
+- ReportLab for PDF generation
+- OpenPyXL for Excel import/export
+
+**Current State:**
+- MVP complete with 38 user stories implemented
+- All features working: workstation setup, DUT management, procedure builder, calibration execution, reports
+
+**Key Files to Know:**
+- `prd.json` - All user stories and requirements
+- `progress.txt` - Development log with patterns and learnings
+- `CLAUDE.md` - Agent instructions
+- `src/calsystem/database/models.py` - All database tables
+- `src/calsystem/ui/` - All UI tabs and dialogs
+
+**To get started:**
+1. Read `prd.json` for feature overview
+2. Read the "Codebase Patterns" section at top of `progress.txt`
+3. Check `git status` and `git log` for recent changes
+
+What I want to work on: [DESCRIBE YOUR TASK HERE]
+
+---END PROMPT---
+
+================================================================================

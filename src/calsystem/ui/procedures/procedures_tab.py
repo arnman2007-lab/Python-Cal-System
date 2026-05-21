@@ -790,8 +790,9 @@ class ProceduresTab(QWidget):
         self.import_btn.clicked.connect(self._on_import_excel)
         toolbar.addWidget(self.import_btn)
 
-        self.save_btn = QPushButton("Save")
+        self.save_btn = QPushButton("Save All")
         self.save_btn.clicked.connect(self._on_save)
+        self.save_btn.setToolTip("Save test point, section, procedure, and export to CSP file")
         toolbar.addWidget(self.save_btn)
 
         self.export_csp_btn = QPushButton("Export CSP")
@@ -2804,7 +2805,7 @@ class ProceduresTab(QWidget):
             QMessageBox.critical(self, "Import Error", f"Failed to import:\n{e}")
 
     def _on_save(self):
-        """Save current procedure to database."""
+        """Save everything: current test point, section, procedure, and export to CSP."""
         name = self.name_input.text().strip()
         if not name:
             QMessageBox.warning(self, "Validation Error", "Procedure name is required.")
@@ -2816,6 +2817,21 @@ class ProceduresTab(QWidget):
             return
 
         try:
+            # Step 1: Save current test point if one is being edited
+            current = self.structure_tree.currentItem()
+            if current:
+                data = current.data(0, Qt.ItemDataRole.UserRole)
+                if data:
+                    if data[0] == "testpoint":
+                        # Save test point silently (no message box)
+                        logger.info("Auto-saving current test point before procedure save")
+                        self._save_current_testpoint(silent=True)
+                    elif data[0] == "section":
+                        # Save section silently
+                        logger.info("Auto-saving current section before procedure save")
+                        self._save_current_section(silent=True)
+
+            # Step 2: Save procedure metadata
             with db.session() as session:
                 if self._current_procedure_id:
                     procedure = session.query(Procedure).filter(
@@ -2834,10 +2850,13 @@ class ProceduresTab(QWidget):
 
             logger.info(f"Saved procedure: {name} (ID: {self._current_procedure_id})")
 
-            # Export to CSP file
+            # Step 3: Export to CSP file automatically
             self._export_current_to_csp()
 
-            QMessageBox.information(self, "Saved", f"Procedure '{name}' saved successfully.")
+            # Step 4: Update flow preview
+            self._update_flow_preview()
+
+            QMessageBox.information(self, "Saved", f"Procedure '{name}' saved and exported to CSP.")
             self._refresh_procedure_list()
 
         except Exception as e:
@@ -3603,15 +3622,21 @@ class ProceduresTab(QWidget):
         self.operate_cmd_input.setEnabled(not is_manual)
         self.measure_cmd_input.setEnabled(not is_manual)
 
-    def _save_current_section(self):
-        """Save the current section details from the form."""
+    def _save_current_section(self, silent: bool = False):
+        """Save the current section details from the form.
+
+        Args:
+            silent: If True, don't show warning messages or success messages (for auto-save)
+        """
         if not self._current_section_id:
-            QMessageBox.warning(self, "No Section", "No section selected to save.")
+            if not silent:
+                QMessageBox.warning(self, "No Section", "No section selected to save.")
             return
 
         name = self.section_name_input.text().strip()
         if not name:
-            QMessageBox.warning(self, "Required", "Please enter a section name.")
+            if not silent:
+                QMessageBox.warning(self, "Required", "Please enter a section name.")
             return
 
         standard_type = self.section_type_combo.currentData() or None
@@ -3653,7 +3678,8 @@ class ProceduresTab(QWidget):
                 if data and data[0] == "testpoint":
                     self._update_flow_preview()
 
-            QMessageBox.information(self, "Saved", "Section saved successfully.")
+            if not silent:
+                QMessageBox.information(self, "Saved", "Section saved successfully.")
 
         except Exception as e:
             logger.error(f"Failed to save section: {e}")
@@ -4155,16 +4181,22 @@ class ProceduresTab(QWidget):
         except Exception as e:
             logger.error(f"Failed to load test point: {e}")
 
-    def _save_current_testpoint(self):
-        """Save the current test point from form to database."""
+    def _save_current_testpoint(self, silent: bool = False):
+        """Save the current test point from form to database.
+
+        Args:
+            silent: If True, don't show warning messages or status messages (for auto-save)
+        """
         current = self.structure_tree.currentItem()
         if not current:
-            QMessageBox.warning(self, "No Selection", "Please select a test point to save.")
+            if not silent:
+                QMessageBox.warning(self, "No Selection", "Please select a test point to save.")
             return
 
         data = current.data(0, Qt.ItemDataRole.UserRole)
         if not data or data[0] != "testpoint":
-            QMessageBox.warning(self, "Invalid Selection", "Please select a test point (not a section) to save.")
+            if not silent:
+                QMessageBox.warning(self, "Invalid Selection", "Please select a test point (not a section) to save.")
             return
 
         tp_id = data[1]
@@ -4405,7 +4437,8 @@ class ProceduresTab(QWidget):
             self._update_flow_preview()
 
             # Show brief confirmation in status bar if available, or message box
-            self.window().statusBar().showMessage("Test point saved", 2000)
+            if not silent:
+                self.window().statusBar().showMessage("Test point saved", 2000)
 
         except Exception as e:
             logger.error(f"Failed to save test point: {e}")

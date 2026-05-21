@@ -3810,6 +3810,13 @@ class ExecutionTab(QWidget):
 
     def _set_calibrator_output(self, tp: Dict[str, Any]):
         """Send output command to calibrator for the test point."""
+        # Check for manual setup - skip all calibrator output if manual setup is enabled
+        if tp.get('manual_setup'):
+            manual_prompt = tp.get('manual_setup_prompt') or "Perform manual setup as instructed"
+            self.status_display.append(f"Manual Setup: {manual_prompt}")
+            self.status_display.append("(No calibrator output - manual setup mode)")
+            return
+
         test_type = tp.get('test_type', 'measurement')
 
         # DUT Pre-Check: Verify DUT is in expected state FIRST (before setup)
