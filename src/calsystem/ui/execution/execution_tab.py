@@ -3006,6 +3006,8 @@ class ExecutionTab(QWidget):
                             "pre_frequency": tp.pre_frequency,
                             "pre_frequency_unit": tp.pre_frequency_unit or "Hz",
                             "pre_delay_seconds": tp.pre_delay_seconds or 0,
+                            "manual_setup": tp.manual_setup or False,
+                            "manual_setup_prompt": tp.manual_setup_prompt,
                             "pre_conditioning_steps": tp.pre_conditioning_steps or [],
                             "measurement_target": tp.measurement_target.value if tp.measurement_target else "PRIMARY",
                             "expected_value": tp.expected_value,
@@ -3186,6 +3188,8 @@ class ExecutionTab(QWidget):
                             "pre_frequency": tp.pre_frequency,
                             "pre_frequency_unit": tp.pre_frequency_unit or "Hz",
                             "pre_delay_seconds": tp.pre_delay_seconds or 0,
+                            "manual_setup": tp.manual_setup or False,
+                            "manual_setup_prompt": tp.manual_setup_prompt,
                             "pre_conditioning_steps": tp.pre_conditioning_steps or [],
                             # Measurement target - what value to compare reading against
                             "measurement_target": tp.measurement_target.value if tp.measurement_target else "PRIMARY",
@@ -3579,8 +3583,23 @@ class ExecutionTab(QWidget):
                     self.status_display.append("Waiting for operator confirmation...")
                     return
 
-            # Send calibrator output command
-            self._set_calibrator_output(tp)
+            # Check for manual setup (shorts, nulls, physical setups - no calibrator output)
+            if tp.get('manual_setup'):
+                manual_prompt = tp.get('manual_setup_prompt') or "Perform manual setup as instructed"
+                reply = QMessageBox.information(
+                    self,
+                    "Manual Setup Required",
+                    f"{manual_prompt}\n\nClick OK when setup is complete and ready to measure.",
+                    QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel
+                )
+                if reply == QMessageBox.StandardButton.Ok:
+                    self.status_display.append(f"Manual setup: {manual_prompt}")
+                else:
+                    self.status_display.append("Manual setup cancelled")
+                    return
+            else:
+                # Send calibrator output command (normal operation)
+                self._set_calibrator_output(tp)
         else:
             # Fallback to table data
             section = self.testpoints_table.item(row, 1).text() if self.testpoints_table.item(row, 1) else "--"

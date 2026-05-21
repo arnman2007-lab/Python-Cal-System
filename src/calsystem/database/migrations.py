@@ -42,6 +42,34 @@ def apply_migrations(db):
                 migrations_applied.append("pass_fail_image")
                 logger.info("✓ Migration applied: pass_fail_image column added")
 
+            # Migration: Add manual_setup column
+            result = session.execute(text(
+                "SELECT COUNT(*) FROM pragma_table_info('test_points') WHERE name='manual_setup'"
+            )).scalar()
+
+            if result == 0:
+                logger.info("Applying migration: Adding manual_setup column")
+                session.execute(text(
+                    "ALTER TABLE test_points ADD COLUMN manual_setup BOOLEAN DEFAULT 0"
+                ))
+                session.commit()
+                migrations_applied.append("manual_setup")
+                logger.info("✓ Migration applied: manual_setup column added")
+
+            # Migration: Add manual_setup_prompt column
+            result = session.execute(text(
+                "SELECT COUNT(*) FROM pragma_table_info('test_points') WHERE name='manual_setup_prompt'"
+            )).scalar()
+
+            if result == 0:
+                logger.info("Applying migration: Adding manual_setup_prompt column")
+                session.execute(text(
+                    "ALTER TABLE test_points ADD COLUMN manual_setup_prompt TEXT"
+                ))
+                session.commit()
+                migrations_applied.append("manual_setup_prompt")
+                logger.info("✓ Migration applied: manual_setup_prompt column added")
+
             # Add future migrations here following the same pattern:
             # 1. Check if column/table exists
             # 2. If not, create it

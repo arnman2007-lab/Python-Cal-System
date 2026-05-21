@@ -1319,9 +1319,31 @@ class ProceduresTab(QWidget):
         pre_steps_btn_layout.addStretch()
         cal_layout.addRow("", pre_steps_btn_layout)
 
+        # Manual Setup section (for shorts, nulls, physical setups)
+        cal_layout.addRow(QLabel(""))  # Spacer
+        manual_setup_label = QLabel("Manual Setup:")
+        manual_setup_label.setStyleSheet("font-weight: bold;")
+        cal_layout.addRow(manual_setup_label)
+
+        self.manual_setup_checkbox = QCheckBox("Skip Calibrator Output (Manual Setup)")
+        self.manual_setup_checkbox.setToolTip(
+            "Check this for shorts, nulls, or other physical setups where the calibrator should not output.\n"
+            "Example: Short the test leads to verify 0.000Ω reading."
+        )
+        self.manual_setup_checkbox.stateChanged.connect(self._on_manual_setup_changed)
+        cal_layout.addRow("", self.manual_setup_checkbox)
+
+        self.manual_setup_prompt_input = QTextEdit()
+        self.manual_setup_prompt_input.setMaximumHeight(60)
+        self.manual_setup_prompt_input.setPlaceholderText(
+            "Instructions for technician (e.g., 'Short the test leads together', 'Open circuit - disconnect leads')"
+        )
+        self.manual_setup_prompt_input.setEnabled(False)
+        cal_layout.addRow("Setup Instructions:", self.manual_setup_prompt_input)
+
         # Commands section
         cal_layout.addRow(QLabel(""))  # Spacer
-        cmd_label = QLabel("Commands:")
+        cmd_label = QLabel("Calibrator Commands:")
         cmd_label.setStyleSheet("font-weight: bold;")
         cal_layout.addRow(cmd_label)
 
@@ -2403,6 +2425,9 @@ class ProceduresTab(QWidget):
         self.pre_freq_unit_combo.setCurrentIndex(0)
         self.pre_delay_input.setValue(0)
         self.pre_steps_table.setRowCount(0)
+        # Manual setup
+        self.manual_setup_checkbox.setChecked(False)
+        self.manual_setup_prompt_input.clear()
         # Commands
         self.cmd_template_combo.setCurrentIndex(0)
         self.source_cmd_input.clear()
@@ -2488,6 +2513,9 @@ class ProceduresTab(QWidget):
             "pre_nominal_value": self.pre_nominal_input.value() if self.pre_nominal_input.value() != 0 else None,
             "pre_unit": self.pre_unit_combo.currentText(),
             "pre_delay_seconds": self.pre_delay_input.value() if self.pre_delay_input.value() > 0 else None,
+            # Manual setup
+            "manual_setup": self.manual_setup_checkbox.isChecked() if hasattr(self, 'manual_setup_checkbox') else False,
+            "manual_setup_prompt": self.manual_setup_prompt_input.toPlainText() if hasattr(self, 'manual_setup_prompt_input') else None,
             # Commands
             "source_command": self.source_cmd_input.text() or None,
             "operate_command": self.operate_cmd_input.text() or None,
@@ -3552,6 +3580,18 @@ class ProceduresTab(QWidget):
             logger.error(f"Failed to load images from library: {e}")
             QMessageBox.critical(self, "Error", f"Failed to load images: {e}")
 
+    def _on_manual_setup_changed(self, state):
+        """Enable/disable manual setup prompt field based on checkbox."""
+        is_manual = (state == Qt.CheckState.Checked.value)
+        self.manual_setup_prompt_input.setEnabled(is_manual)
+
+        # Disable calibrator command fields when manual setup is checked
+        self.cmd_template_combo.setEnabled(not is_manual)
+        self.load_templates_btn.setEnabled(not is_manual)
+        self.source_cmd_input.setEnabled(not is_manual)
+        self.operate_cmd_input.setEnabled(not is_manual)
+        self.measure_cmd_input.setEnabled(not is_manual)
+
     def _save_current_section(self):
         """Save the current section details from the form."""
         if not self._current_section_id:
@@ -3979,6 +4019,10 @@ class ProceduresTab(QWidget):
                 # Load additional pre-conditioning steps
                 self._load_pre_steps(tp.pre_conditioning_steps or [])
 
+                # Manual setup
+                self.manual_setup_checkbox.setChecked(tp.manual_setup or False)
+                self.manual_setup_prompt_input.setPlainText(tp.manual_setup_prompt or "")
+
                 # Commands
                 self.source_cmd_input.setText(tp.source_command or "")
                 self.operate_cmd_input.setText(tp.operate_command or "")
@@ -4227,6 +4271,10 @@ class ProceduresTab(QWidget):
                 # Save additional pre-conditioning steps
                 pre_steps = self._save_pre_steps()
                 tp.pre_conditioning_steps = pre_steps if pre_steps else None
+
+                # Manual setup (for shorts, nulls, physical setups)
+                tp.manual_setup = self.manual_setup_checkbox.isChecked()
+                tp.manual_setup_prompt = self.manual_setup_prompt_input.toPlainText().strip() or None
 
                 tp.source_command = self.source_cmd_input.text().strip() or None
                 tp.operate_command = self.operate_cmd_input.text().strip() or None

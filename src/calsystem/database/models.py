@@ -504,6 +504,10 @@ class TestPoint(Base):
     # Each step: {"value": 310, "unit": "OHM", "frequency": 0, "frequency_unit": "Hz", "delay": 2}
     pre_conditioning_steps = Column(JSON, nullable=True, comment="Additional pre-conditioning steps")
 
+    # Manual Setup (for shorts, nulls, or other physical setups - no calibrator output)
+    manual_setup = Column(Boolean, default=False, comment="If True, skip calibrator output - tech sets up manually")
+    manual_setup_prompt = Column(Text, nullable=True, comment="Instructions for manual setup (e.g., 'Short the test leads together')")
+
     # Pass/Fail prompt (for subjective tests like beeper check)
     pass_fail_prompt = Column(Text, nullable=True, comment="Prompt shown to tech for Pass/Fail tests")
     pass_fail_image = Column(String(255), nullable=True, comment="Optional reference image name from wiring diagram library")
