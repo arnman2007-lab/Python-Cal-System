@@ -3586,6 +3586,19 @@ class ExecutionTab(QWidget):
 
             # Check for manual setup (shorts, nulls, physical setups - no calibrator output)
             if tp.get('manual_setup'):
+                # Put calibrator into standby mode before manual setup
+                # This ensures calibrator output is off even if previous test left it on
+                if self._selected_calibrator:
+                    address = self._get_calibrator_address()
+                    if address:
+                        visa = get_visa_manager()
+                        stby_cmd = self._get_calibrator_command("STANDBY") or self._get_calibrator_command("STBY")
+                        if stby_cmd:
+                            if visa.write(address, stby_cmd):
+                                self.status_display.append(f"Calibrator set to STANDBY for manual setup")
+                            else:
+                                self.status_display.append(f"WARNING: Failed to set calibrator to STANDBY")
+
                 manual_prompt = tp.get('manual_setup_prompt') or "Perform manual setup as instructed"
                 reply = QMessageBox.information(
                     self,
@@ -3813,6 +3826,18 @@ class ExecutionTab(QWidget):
         """Send output command to calibrator for the test point."""
         # Check for manual setup - skip all calibrator output if manual setup is enabled
         if tp.get('manual_setup'):
+            # Put calibrator into standby mode for manual setup
+            if self._selected_calibrator:
+                address = self._get_calibrator_address()
+                if address:
+                    visa = get_visa_manager()
+                    stby_cmd = self._get_calibrator_command("STANDBY") or self._get_calibrator_command("STBY")
+                    if stby_cmd:
+                        if visa.write(address, stby_cmd):
+                            self.status_display.append(f"Calibrator set to STANDBY for manual setup")
+                        else:
+                            self.status_display.append(f"WARNING: Failed to set calibrator to STANDBY")
+
             manual_prompt = tp.get('manual_setup_prompt') or "Perform manual setup as instructed"
             self.status_display.append(f"Manual Setup: {manual_prompt}")
             self.status_display.append("(No calibrator output - manual setup mode)")
@@ -4219,11 +4244,28 @@ class ExecutionTab(QWidget):
         tp = self._test_points[row]
         test_type = tp.get('test_type', 'measurement')
 
+        # Check for manual setup - skip all calibrator output if manual setup is enabled
+        if tp.get('manual_setup'):
+            # Put calibrator into standby mode for manual setup
+            if self._selected_calibrator:
+                address = self._get_calibrator_address()
+                if address:
+                    visa = get_visa_manager()
+                    stby_cmd = self._get_calibrator_command("STANDBY") or self._get_calibrator_command("STBY")
+                    if stby_cmd:
+                        if visa.write(address, stby_cmd):
+                            self.status_display.append(f"Calibrator set to STANDBY for manual setup")
+                        else:
+                            self.status_display.append(f"WARNING: Failed to set calibrator to STANDBY")
+
+            self.status_display.append("Manual setup mode - no calibrator output")
+            # Continue with DMM or DUT reading below (skip calibrator commands)
+
         # Determine if we need calibrator output based on test type
         # dmm_measurement: DMM only (no calibrator)
         # calibrator_dmm: Calibrator + DMM
         # measurement: Manual entry or DUT query (calibrator optional)
-        use_calibrator = test_type not in ['dmm_measurement']
+        use_calibrator = test_type not in ['dmm_measurement'] and not tp.get('manual_setup')
         use_dmm = test_type in ['dmm_measurement', 'calibrator_dmm'] or self._selected_dmm
 
         # Get source command - from test point or command bank
