@@ -22,6 +22,7 @@ from loguru import logger
 from calsystem.config.settings import get_settings
 from calsystem.database.connection import get_db
 from calsystem.database.models import ChangelogEntry
+from calsystem.database.migrations import apply_migrations
 from calsystem.procedures import sync_procedure_index
 
 
@@ -60,6 +61,13 @@ class CalsystemApp(QMainWindow):
                         logger.info("Database tables created/verified")
                     except Exception as e:
                         logger.warning(f"Table creation warning: {e}")
+
+                    # Apply database migrations (adds new columns automatically)
+                    try:
+                        apply_migrations(db)
+                    except Exception as e:
+                        logger.warning(f"Migration warning: {e}")
+
                     self._update_db_status(True)
                 else:
                     self._update_db_status(False)
