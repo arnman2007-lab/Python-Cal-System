@@ -3545,8 +3545,9 @@ class ExecutionTab(QWidget):
                 self.status_display.append(f"NEW SECTION: {tp['section_name']}")
 
                 # Execute section command if specified (before wiring dialog)
+                # Skip if this test point uses manual setup (shorts, nulls, physical setups)
                 section_command = tp.get('section_command')
-                if section_command:
+                if section_command and not tp.get('manual_setup'):
                     self._execute_section_command(section_command)
 
                 # Show section prompt if specified
