@@ -3320,14 +3320,50 @@ class ExecutionTab(QWidget):
 
             logger.info(f"Loaded CSP: {self._current_csp_data.name} with {self._current_csp_data.section_count} sections")
 
+            # Load database test points to get IDs for CSP test points
+            # This allows test_results to properly reference test_points in reports
+            db = get_db()
+            db_test_points_by_section_order = {}
+            if db.is_connected and self._current_procedure_id:
+                try:
+                    with db.session() as session:
+                        procedure = session.query(Procedure).filter(
+                            Procedure.id == self._current_procedure_id
+                        ).first()
+                        if procedure:
+                            for section in procedure.sections:
+                                section_order = section.order or 0
+                                db_test_points_by_section_order[section_order] = {}
+                                for tp in section.test_points:
+                                    tp_order = tp.order or 0
+                                    # Map by section order and test point order
+                                    db_test_points_by_section_order[section_order][tp_order] = {
+                                        'id': tp.id,
+                                        'section_id': section.id,
+                                    }
+                            logger.debug(f"Loaded {len(db_test_points_by_section_order)} sections with database IDs")
+                except Exception as e:
+                    logger.warning(f"Could not load database test point IDs: {e}")
+
             # Convert CSP data to test points list
-            section_id = 0  # Use sequential IDs for sections
             for section in self._current_csp_data.sections:
-                section_id += 1
+                section_order = section.order or 0
                 for tp in section.test_points:
+                    tp_order = tp.order or 0
+
+                    # Try to match with database test point to get ID
+                    test_point_id = None
+                    section_id = None
+                    if section_order in db_test_points_by_section_order:
+                        if tp_order in db_test_points_by_section_order[section_order]:
+                            db_tp = db_test_points_by_section_order[section_order][tp_order]
+                            test_point_id = db_tp['id']
+                            section_id = db_tp['section_id']
+                            logger.debug(f"Matched CSP test point (section {section_order}, tp {tp_order}) to DB ID {test_point_id}")
+
                     self._test_points.append({
-                        "id": None,  # No database ID for CSP-loaded test points
-                        "section_id": section_id,
+                        "id": test_point_id,  # Use database ID if found, otherwise None
+                        "section_id": section_id,  # Use database section ID if found
                         "section_name": section.name,
                         "standard_section_type": section.standard_section_type,
                         "section_command": section.section_command,
@@ -5078,6 +5114,12 @@ class ExecutionTab(QWidget):
         if not tp:
             return
 
+        # Check if test point has database ID (CSP-loaded points may not)
+        test_point_id = tp.get('id')
+        if test_point_id is None:
+            logger.info(f"Test result (CSP session without DB ID, not saved to DB): {measured_value:.6g} ({'PASS' if passed else 'FAIL'})")
+            return
+
         db = get_db()
         if not db.is_connected:
             return
@@ -5089,7 +5131,7 @@ class ExecutionTab(QWidget):
 
                 result = TestResult(
                     session_id=self._current_session_id,
-                    test_point_id=tp['id'],
+                    test_point_id=test_point_id,
                     measured_value=measured_value,
                     status="pass" if passed else "fail",
                     input_method=input_method,
