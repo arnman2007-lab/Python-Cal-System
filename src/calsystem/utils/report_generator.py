@@ -482,7 +482,7 @@ def build_report_from_session(session_id: int) -> Optional[Dict[str, Any]]:
                     tp.tol_range_value, tp.tol_span_value,
                     tp.tolerance_value, tp.tolerance_type,
                     tp.section_id, tp.measurement_target,
-                    tp.test_type, tp.description, tp.pass_fail_prompt,
+                    tp.test_type, tp.description, tp.operator_prompt,
                     ts.name as section_name, ts.id as sect_id
                 FROM test_results tr
                 JOIN test_points tp ON tr.test_point_id = tp.id
@@ -516,10 +516,10 @@ def build_report_from_session(session_id: int) -> Optional[Dict[str, Any]]:
                     # Get test type (normalize to lowercase)
                     test_type = str(row.test_type).lower() if row.test_type else "measurement"
 
-                    # Get test description (use pass_fail_prompt for pass/fail tests, otherwise description)
+                    # Get test description (use operator_prompt for pass/fail tests - this is the short "check name")
                     test_description = None
                     if test_type == "pass_fail":
-                        test_description = row.pass_fail_prompt or row.description
+                        test_description = row.operator_prompt or row.description or "Pass/Fail Test"
                     else:
                         test_description = row.description
 
