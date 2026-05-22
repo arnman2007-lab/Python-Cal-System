@@ -3830,6 +3830,8 @@ class ExecutionTab(QWidget):
 
     def _set_calibrator_output(self, tp: Dict[str, Any]):
         """Send output command to calibrator for the test point."""
+        test_type = tp.get('test_type', 'measurement')
+
         # Check for manual setup - skip all calibrator output if manual setup is enabled
         if tp.get('manual_setup'):
             # Put calibrator into standby mode for manual setup
@@ -3847,9 +3849,12 @@ class ExecutionTab(QWidget):
             manual_prompt = tp.get('manual_setup_prompt') or "Perform manual setup as instructed"
             self.status_display.append(f"Manual Setup: {manual_prompt}")
             self.status_display.append("(No calibrator output - manual setup mode)")
-            return
 
-        test_type = tp.get('test_type', 'measurement')
+            # For pass/fail tests, don't return early - we still need to execute the pass/fail dialog
+            # Just skip the calibrator output commands below
+            if test_type != 'pass_fail':
+                return
+            # Fall through to pass_fail execution below (line ~3868)
 
         # DUT Pre-Check: Verify DUT is in expected state FIRST (before setup)
         # This ensures tech sets knob position before we configure range
@@ -3866,8 +3871,8 @@ class ExecutionTab(QWidget):
 
         # For Pass/Fail tests, check if we need to do pre-conditioning first
         if test_type == 'pass_fail':
-            # Execute pre-conditioning if defined and we have a calibrator
-            if self._selected_calibrator and self._has_preconditioning(tp):
+            # Execute pre-conditioning if defined and we have a calibrator (skip if manual setup)
+            if self._selected_calibrator and self._has_preconditioning(tp) and not tp.get('manual_setup'):
                 self._execute_passfail_preconditioning(tp)
             # Then show the Pass/Fail dialog
             self._execute_pass_fail_test(tp)
