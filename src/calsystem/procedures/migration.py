@@ -270,6 +270,10 @@ def _convert_test_point(tp: TestPoint) -> TestPointData:
         dut_post_read_param=getattr(tp, 'dut_post_read_param', None),
         dut_post_read_parser=getattr(tp, 'dut_post_read_parser', None),
         dut_post_read_index=getattr(tp, 'dut_post_read_index', None),
+
+        # Manual Setup (physical configurations, shorts, nulls - no calibrator output)
+        manual_setup=getattr(tp, 'manual_setup', False) or False,
+        manual_setup_prompt=getattr(tp, 'manual_setup_prompt', None),
     )
 
 
