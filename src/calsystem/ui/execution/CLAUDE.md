@@ -140,6 +140,56 @@ if tp.get('manual_setup'):
 
 ---
 
+#### Bug #5: Test Sections/Points Missing from Reports
+**Symptoms:**
+- Complete test points during session execution
+- Generate report from session
+- Report PDF is empty - no test sections or test points appear
+
+**Root Cause:**
+When test points are loaded from CSP files, they were assigned `id=None` because they don't have database IDs. When test results were saved with `test_point_id=None`, the report SQL query `JOIN test_points tp ON tr.test_point_id = tp.id` failed because it couldn't match NULL values.
+
+**Location:** `_load_test_points_from_csp()` around line 3304
+
+**Fix:** Match CSP test points to their database counterparts by section order and test point order
+```python
+# Load database test points to get IDs for CSP test points
+db_test_points_by_section_order = {}
+if db.is_connected and self._current_procedure_id:
+    with db.session() as session:
+        procedure = session.query(Procedure).filter(...).first()
+        for section in procedure.sections:
+            section_order = section.order or 0
+            db_test_points_by_section_order[section_order] = {}
+            for tp in section.test_points:
+                tp_order = tp.order or 0
+                db_test_points_by_section_order[section_order][tp_order] = {
+                    'id': tp.id,
+                    'section_id': section.id,
+                }
+
+# When creating test point dicts from CSP:
+test_point_id = None
+section_id = None
+if section_order in db_test_points_by_section_order:
+    if tp_order in db_test_points_by_section_order[section_order]:
+        db_tp = db_test_points_by_section_order[section_order][tp_order]
+        test_point_id = db_tp['id']
+        section_id = db_tp['section_id']
+```
+
+Also add safety check in `_save_test_result()`:
+```python
+test_point_id = tp.get('id')
+if test_point_id is None:
+    logger.info(f"Test result (CSP session without DB ID, not saved to DB)")
+    return
+```
+
+**Commit:** db6f1b5
+
+---
+
 ### Test Type Flow Chart
 
 ```
