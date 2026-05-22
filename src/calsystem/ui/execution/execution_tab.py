@@ -923,7 +923,8 @@ class ExecutionTab(QWidget):
             with db.session() as session:
                 duts = session.query(DUT).order_by(DUT.asset_number).all()
                 for dut in duts:
-                    label = f"{dut.asset_number} - {dut.make} {dut.model}"
+                    # Show only asset number - make/model is redundant since user knows what they're selecting
+                    label = dut.asset_number
                     self.dut_combo.addItem(label, dut.id)
 
                 # Restore selection if text matches
@@ -2254,7 +2255,7 @@ class ExecutionTab(QWidget):
     # -------------------------------------------------------------------------
 
     def _on_dut_selected(self, index: int):
-        """Handle DUT selection - auto-select assigned procedure."""
+        """Handle DUT selection - auto-select matching procedure based on model."""
         dut_id = self.dut_combo.currentData()
         if not dut_id:
             return
@@ -2266,23 +2267,46 @@ class ExecutionTab(QWidget):
         try:
             with db.session() as session:
                 dut = session.query(DUT).filter(DUT.id == dut_id).first()
-                if dut and dut.default_procedure_id:
-                    # Select the assigned procedure
+                if not dut:
+                    return
+
+                procedure_selected = False
+
+                # First try: Use assigned default procedure if set
+                if dut.default_procedure_id:
                     for i in range(self.procedure_combo.count()):
                         if self.procedure_combo.itemData(i) == dut.default_procedure_id:
                             self.procedure_combo.setCurrentIndex(i)
-                            logger.debug(f"Auto-selected procedure for DUT {dut.asset_number}")
+                            logger.debug(f"Auto-selected assigned procedure for DUT {dut.asset_number}")
+                            procedure_selected = True
                             break
 
-                    # Set input method based on DUT preference
-                    if dut.preferred_input_method:
-                        method_map = {
-                            "keyboard": 0,
-                            "remote": 1,
-                            "webcam": 2,
-                        }
-                        idx = method_map.get(dut.preferred_input_method.value, 0)
-                        self.input_method_combo.setCurrentIndex(idx)
+                # Second try: Match by model number if no default procedure assigned
+                if not procedure_selected and dut.model:
+                    procedures = session.query(Procedure).all()
+                    for proc in procedures:
+                        # Match if procedure target_model matches DUT model
+                        # Case-insensitive match, handles variations like "3468A" vs "3468a"
+                        if proc.target_model and proc.target_model.lower() == dut.model.lower():
+                            # Find this procedure in the combo and select it
+                            for i in range(self.procedure_combo.count()):
+                                if self.procedure_combo.itemData(i) == proc.id:
+                                    self.procedure_combo.setCurrentIndex(i)
+                                    logger.info(f"Auto-selected procedure '{proc.name}' for DUT {dut.asset_number} (matched model: {dut.model})")
+                                    procedure_selected = True
+                                    break
+                            if procedure_selected:
+                                break
+
+                # Set input method based on DUT preference
+                if dut.preferred_input_method:
+                    method_map = {
+                        "keyboard": 0,
+                        "remote": 1,
+                        "webcam": 2,
+                    }
+                    idx = method_map.get(dut.preferred_input_method.value, 0)
+                    self.input_method_combo.setCurrentIndex(idx)
 
         except Exception as e:
             logger.error(f"Failed to load DUT preferences: {e}")
