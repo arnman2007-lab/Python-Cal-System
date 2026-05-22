@@ -99,6 +99,10 @@ class TestPointData:
     dut_post_read_parser: Optional[str] = None
     dut_post_read_index: Optional[int] = None  # For CSV responses, which field contains the value (0-based)
 
+    # Manual Setup (physical configurations, shorts, nulls - no calibrator output)
+    manual_setup: bool = False
+    manual_setup_prompt: Optional[str] = None
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
         return {
@@ -156,6 +160,8 @@ class TestPointData:
             "dut_post_read_param": self.dut_post_read_param,
             "dut_post_read_parser": self.dut_post_read_parser,
             "dut_post_read_index": self.dut_post_read_index,
+            "manual_setup": self.manual_setup,
+            "manual_setup_prompt": self.manual_setup_prompt,
         }
 
     @classmethod
@@ -216,6 +222,8 @@ class TestPointData:
             dut_post_read_param=data.get("dut_post_read_param"),
             dut_post_read_parser=data.get("dut_post_read_parser"),
             dut_post_read_index=data.get("dut_post_read_index"),
+            manual_setup=data.get("manual_setup", False),
+            manual_setup_prompt=data.get("manual_setup_prompt"),
         )
 
 
