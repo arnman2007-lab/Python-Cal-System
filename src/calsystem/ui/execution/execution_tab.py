@@ -3602,18 +3602,21 @@ class ExecutionTab(QWidget):
                             else:
                                 self.status_display.append(f"WARNING: Failed to set calibrator to STANDBY")
 
-                manual_prompt = tp.get('manual_setup_prompt') or "Perform manual setup as instructed"
-                reply = QMessageBox.information(
-                    self,
-                    "Manual Setup Required",
-                    f"{manual_prompt}\n\nClick OK when setup is complete and ready to measure.",
-                    QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel
-                )
-                if reply == QMessageBox.StandardButton.Ok:
-                    self.status_display.append(f"Manual setup: {manual_prompt}")
-                else:
-                    self.status_display.append("Manual setup cancelled")
-                    return
+                # For pass/fail tests, skip the manual setup dialog - the pass/fail dialog handles everything
+                # For regular measurements, show manual setup instructions
+                if test_type != 'pass_fail':
+                    manual_prompt = tp.get('manual_setup_prompt') or "Perform manual setup as instructed"
+                    reply = QMessageBox.information(
+                        self,
+                        "Manual Setup Required",
+                        f"{manual_prompt}\n\nClick OK when setup is complete and ready to measure.",
+                        QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel
+                    )
+                    if reply == QMessageBox.StandardButton.Ok:
+                        self.status_display.append(f"Manual setup: {manual_prompt}")
+                    else:
+                        self.status_display.append("Manual setup cancelled")
+                        return
             else:
                 # Send calibrator output command (normal operation)
                 self._set_calibrator_output(tp)
