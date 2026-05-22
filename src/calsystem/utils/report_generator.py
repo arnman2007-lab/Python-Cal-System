@@ -57,6 +57,8 @@ class TestPointResult:
     frequency: Optional[float] = None
     frequency_unit: Optional[str] = None
     measurement_target: str = "PRIMARY"  # PRIMARY or FREQUENCY
+    test_type: str = "measurement"  # measurement, pass_fail, etc.
+    description: Optional[str] = None  # Test description for pass/fail tests
 
 
 @dataclass
@@ -245,25 +247,28 @@ def generate_calibration_report(
 
         # === TEST SECTIONS ===
         for section in sections:
-            # Group test points by tolerance spec
-            tolerance_groups = []
+            # Group test points by test type and tolerance spec
+            # Format: [(test_type, tolerance_spec, [test_points])]
+            groups = []
             current_group = []
+            current_type = None
             current_tol = None
 
             for tp in section.test_points:
-                if tp.tolerance_spec != current_tol:
+                if tp.test_type != current_type or tp.tolerance_spec != current_tol:
                     if current_group:
-                        tolerance_groups.append((current_tol, current_group))
+                        groups.append((current_type, current_tol, current_group))
                     current_group = [tp]
+                    current_type = tp.test_type
                     current_tol = tp.tolerance_spec
                 else:
                     current_group.append(tp)
             if current_group:
-                tolerance_groups.append((current_tol, current_group))
+                groups.append((current_type, current_tol, current_group))
 
-            # Render each tolerance group
+            # Render each group
             is_first_group = True
-            for tol_spec, group_points in tolerance_groups:
+            for test_type, tol_spec, group_points in groups:
                 # Collect group elements to keep together on same page
                 group_elements = []
 
@@ -274,50 +279,77 @@ def generate_calibration_report(
                     group_elements.append(Spacer(1, 6))
                     is_first_group = False
 
-                # Tolerance header for this group
-                if tol_spec:
+                # Check if this is a pass/fail test group
+                is_pass_fail = test_type == "pass_fail"
+
+                # Tolerance header for this group (only for measurement tests)
+                if tol_spec and not is_pass_fail:
                     tol_para = Paragraph(f"<i>Tolerance: {tol_spec}</i>",
                                         ParagraphStyle('TolSpec', parent=styles['Normal'],
                                                       fontSize=9, alignment=TA_CENTER))
                     group_elements.append(tol_para)
                     group_elements.append(Spacer(1, 3))
 
-                # Results table
-                table_data = [
-                    ['Nominal Value', 'Low Limit', 'UUT Reading', 'High Limit', 'Error', 'Result']
-                ]
+                # Results table - different format for pass/fail vs measurement
+                if is_pass_fail:
+                    # Simple table for pass/fail tests: Test Name | Result
+                    table_data = [
+                        ['Test', 'Result']
+                    ]
+                else:
+                    # Full table for measurement tests
+                    table_data = [
+                        ['Nominal Value', 'Low Limit', 'UUT Reading', 'High Limit', 'Error', 'Result']
+                    ]
 
                 for tp in group_points:
-                    # Determine decimal places: prefer resolution, fall back to nominal's natural decimals
-                    if tp.resolution and tp.resolution > 0:
-                        decimals = _get_decimal_places_from_resolution(tp.resolution)
+                    if is_pass_fail:
+                        # Pass/Fail row: just test name and result
+                        row = [
+                            tp.description or "Pass/Fail Test",
+                            tp.result,
+                        ]
+                        table_data.append(row)
                     else:
-                        decimals = _get_decimal_places(tp.nominal_value)
-
-                    # Format nominal with frequency if present (clean format - no trailing zeros)
-                    if tp.frequency and tp.measurement_target != "FREQUENCY":
-                        nominal_str = f"{_format_nominal(tp.nominal_value)} {tp.unit} @ {_format_nominal(tp.frequency)} {tp.frequency_unit or 'Hz'}"
-                    elif tp.measurement_target == "FREQUENCY" and tp.frequency:
-                        # For frequency measurements, show frequency as the nominal
-                        nominal_str = f"{_format_nominal(tp.frequency)} {tp.frequency_unit or 'Hz'}"
+                        # Measurement row: full details
+                        # Determine decimal places: prefer resolution, fall back to nominal's natural decimals
                         if tp.resolution and tp.resolution > 0:
                             decimals = _get_decimal_places_from_resolution(tp.resolution)
                         else:
-                            decimals = _get_decimal_places(tp.frequency)
-                    else:
-                        nominal_str = f"{_format_nominal(tp.nominal_value)} {tp.unit}"
+                            decimals = _get_decimal_places(tp.nominal_value)
 
-                    row = [
-                        nominal_str,
-                        _format_value(tp.low_limit, decimals),
-                        _format_value(tp.measured_value, decimals),
-                        _format_value(tp.high_limit, decimals),
-                        _format_value(tp.error, decimals),  # Same precision as other values
-                        tp.result,
-                    ]
-                    table_data.append(row)
+                        # Format nominal with frequency if present (clean format - no trailing zeros)
+                        if tp.frequency and tp.measurement_target != "FREQUENCY":
+                            nominal_str = f"{_format_nominal(tp.nominal_value)} {tp.unit} @ {_format_nominal(tp.frequency)} {tp.frequency_unit or 'Hz'}"
+                        elif tp.measurement_target == "FREQUENCY" and tp.frequency:
+                            # For frequency measurements, show frequency as the nominal
+                            nominal_str = f"{_format_nominal(tp.frequency)} {tp.frequency_unit or 'Hz'}"
+                            if tp.resolution and tp.resolution > 0:
+                                decimals = _get_decimal_places_from_resolution(tp.resolution)
+                            else:
+                                decimals = _get_decimal_places(tp.frequency)
+                        else:
+                            nominal_str = f"{_format_nominal(tp.nominal_value)} {tp.unit}"
 
-                results_table = Table(table_data, colWidths=[1.5*inch, 1*inch, 1.2*inch, 1*inch, 0.9*inch, 0.9*inch])
+                        row = [
+                            nominal_str,
+                            _format_value(tp.low_limit, decimals),
+                            _format_value(tp.measured_value, decimals),
+                            _format_value(tp.high_limit, decimals),
+                            _format_value(tp.error, decimals),  # Same precision as other values
+                            tp.result,
+                        ]
+                        table_data.append(row)
+
+                # Table configuration based on test type
+                if is_pass_fail:
+                    # Pass/Fail table: 2 columns (Test Name, Result)
+                    results_table = Table(table_data, colWidths=[5*inch, 1.5*inch])
+                    result_col = 1  # Result is in column 1 for pass/fail
+                else:
+                    # Measurement table: 6 columns
+                    results_table = Table(table_data, colWidths=[1.5*inch, 1*inch, 1.2*inch, 1*inch, 0.9*inch, 0.9*inch])
+                    result_col = 5  # Result is in column 5 for measurements
 
                 # Table styling
                 style_commands = [
@@ -339,13 +371,17 @@ def generate_calibration_report(
                     ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
                 ]
 
+                # For pass/fail tables, left-align the test name column
+                if is_pass_fail:
+                    style_commands.append(('ALIGN', (0, 1), (0, -1), 'LEFT'))
+
                 # Color code Pass/Fail results
                 for i, tp in enumerate(group_points, start=1):
                     if tp.result.lower() == 'fail':
-                        style_commands.append(('TEXTCOLOR', (5, i), (5, i), colors.red))
-                        style_commands.append(('FONTNAME', (5, i), (5, i), 'Helvetica-Bold'))
+                        style_commands.append(('TEXTCOLOR', (result_col, i), (result_col, i), colors.red))
+                        style_commands.append(('FONTNAME', (result_col, i), (result_col, i), 'Helvetica-Bold'))
                     else:
-                        style_commands.append(('TEXTCOLOR', (5, i), (5, i), colors.green))
+                        style_commands.append(('TEXTCOLOR', (result_col, i), (result_col, i), colors.green))
 
                 results_table.setStyle(TableStyle(style_commands))
                 group_elements.append(results_table)
@@ -446,6 +482,7 @@ def build_report_from_session(session_id: int) -> Optional[Dict[str, Any]]:
                     tp.tol_range_value, tp.tol_span_value,
                     tp.tolerance_value, tp.tolerance_type,
                     tp.section_id, tp.measurement_target,
+                    tp.test_type, tp.description, tp.pass_fail_prompt,
                     ts.name as section_name, ts.id as sect_id
                 FROM test_results tr
                 JOIN test_points tp ON tr.test_point_id = tp.id
@@ -476,6 +513,16 @@ def build_report_from_session(session_id: int) -> Optional[Dict[str, Any]]:
                 section_unit = ""
 
                 for row in result_rows:
+                    # Get test type
+                    test_type = str(row.test_type) if row.test_type else "measurement"
+
+                    # Get test description (use pass_fail_prompt for pass/fail tests, otherwise description)
+                    test_description = None
+                    if test_type == "pass_fail":
+                        test_description = row.pass_fail_prompt or row.description
+                    else:
+                        test_description = row.description
+
                     # Build tolerance spec for this test point
                     tol_spec = ToleranceSpec(
                         pct_reading=row.tol_pct_reading or 0,
@@ -533,6 +580,8 @@ def build_report_from_session(session_id: int) -> Optional[Dict[str, Any]]:
                         frequency=row.frequency,
                         frequency_unit=row.frequency_unit,
                         measurement_target=measurement_target,
+                        test_type=test_type,
+                        description=test_description,
                     ))
 
                     if not section_unit and row.unit:
