@@ -3362,6 +3362,9 @@ class ExecutionTab(QWidget):
                         "dut_post_read_param": tp.dut_post_read_param,
                         "dut_post_read_parser": tp.dut_post_read_parser,
                         "dut_post_read_index": tp.dut_post_read_index,
+                        # Manual Setup (physical configurations, shorts, nulls - no calibrator output)
+                        "manual_setup": tp.manual_setup or False,
+                        "manual_setup_prompt": tp.manual_setup_prompt,
                     })
 
             if not self._test_points:
