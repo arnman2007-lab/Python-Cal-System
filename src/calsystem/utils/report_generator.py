@@ -513,8 +513,8 @@ def build_report_from_session(session_id: int) -> Optional[Dict[str, Any]]:
                 section_unit = ""
 
                 for row in result_rows:
-                    # Get test type
-                    test_type = str(row.test_type) if row.test_type else "measurement"
+                    # Get test type (normalize to lowercase)
+                    test_type = str(row.test_type).lower() if row.test_type else "measurement"
 
                     # Get test description (use pass_fail_prompt for pass/fail tests, otherwise description)
                     test_description = None
