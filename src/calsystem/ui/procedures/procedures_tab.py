@@ -39,7 +39,7 @@ from PyQt6.QtWidgets import (
     QCheckBox,
     QInputDialog,
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QPixmap, QImage
 from loguru import logger
 
@@ -714,6 +714,12 @@ class ProceduresTab(QWidget):
         self._selected_calibrator_commands: Optional[Dict[str, str]] = None
         # Cached DMM selection for this session
         self._selected_dmm: Optional[Dict[str, Any]] = None
+
+        # Auto-save timer (debounce - saves 2 seconds after last change)
+        self._autosave_timer = QTimer()
+        self._autosave_timer.setSingleShot(True)
+        self._autosave_timer.timeout.connect(self._autosave)
+
         self._init_ui()
 
     def showEvent(self, event):
@@ -799,6 +805,11 @@ class ProceduresTab(QWidget):
         self.export_csp_btn.clicked.connect(self._on_export_csp)
         self.export_csp_btn.setToolTip("Export procedure to .csp file")
         toolbar.addWidget(self.export_csp_btn)
+
+        # Auto-save status indicator
+        self.autosave_status = QLabel("")
+        self.autosave_status.setStyleSheet("color: #888; font-size: 11px; padding: 0 10px;")
+        toolbar.addWidget(self.autosave_status)
 
         toolbar.addStretch()
 
@@ -2325,6 +2336,9 @@ class ProceduresTab(QWidget):
         # Connect signals to update flow preview in real-time
         self._connect_flow_signals()
 
+        # Connect signals for auto-save (debounced)
+        self._connect_autosave_signals()
+
     def _connect_flow_signals(self):
         """Connect form field signals to update flow preview."""
         # Test type
@@ -2371,6 +2385,96 @@ class ProceduresTab(QWidget):
         self.dut_postread_param_input.textChanged.connect(self._update_flow_preview)
         self.dut_postread_parser_combo.currentTextChanged.connect(self._update_flow_preview)
         self.dut_postread_index_input.valueChanged.connect(self._update_flow_preview)
+
+    def _connect_autosave_signals(self):
+        """Connect form field signals to trigger auto-save (debounced)."""
+        # Procedure info
+        self.name_input.textChanged.connect(self._schedule_autosave)
+        self.target_make_input.textChanged.connect(self._schedule_autosave)
+        self.target_model_input.textChanged.connect(self._schedule_autosave)
+
+        # Section info
+        self.section_name_input.textChanged.connect(self._schedule_autosave)
+        self.section_type_combo.currentTextChanged.connect(self._schedule_autosave)
+        self.section_wiring_combo.currentTextChanged.connect(self._schedule_autosave)
+        self.section_prompt_input.textChanged.connect(self._schedule_autosave)
+
+        # Test point - basic
+        self.test_type_combo.currentIndexChanged.connect(self._schedule_autosave)
+        self.nominal_input.valueChanged.connect(self._schedule_autosave)
+        self.unit_combo.currentTextChanged.connect(self._schedule_autosave)
+        self.frequency_input.valueChanged.connect(self._schedule_autosave)
+        self.freq_unit_combo.currentTextChanged.connect(self._schedule_autosave)
+
+        # Test point - tolerance
+        self.tolerance_input.valueChanged.connect(self._schedule_autosave)
+        self.tolerance_type_combo.currentIndexChanged.connect(self._schedule_autosave)
+        self.tol_pct_reading_input.valueChanged.connect(self._schedule_autosave)
+        self.tol_pct_range_input.valueChanged.connect(self._schedule_autosave)
+        self.tol_range_value_input.valueChanged.connect(self._schedule_autosave)
+        self.tol_pct_span_input.valueChanged.connect(self._schedule_autosave)
+        self.tol_span_value_input.valueChanged.connect(self._schedule_autosave)
+        self.tol_digits_input.valueChanged.connect(self._schedule_autosave)
+        self.tol_decimal_places_input.valueChanged.connect(self._schedule_autosave)
+        self.tol_absolute_input.valueChanged.connect(self._schedule_autosave)
+
+        # Test point - measurement target
+        self.measurement_target_combo.currentIndexChanged.connect(self._schedule_autosave)
+        self.expected_value_input.valueChanged.connect(self._schedule_autosave)
+        self.expected_unit_combo.currentTextChanged.connect(self._schedule_autosave)
+
+        # Test point - pre-conditioning
+        self.pre_nominal_input.valueChanged.connect(self._schedule_autosave)
+        self.pre_unit_combo.currentTextChanged.connect(self._schedule_autosave)
+        self.pre_frequency_input.valueChanged.connect(self._schedule_autosave)
+        self.pre_freq_unit_combo.currentTextChanged.connect(self._schedule_autosave)
+        self.pre_delay_input.valueChanged.connect(self._schedule_autosave)
+
+        # Test point - manual setup
+        self.manual_setup_checkbox.stateChanged.connect(self._schedule_autosave)
+        self.manual_setup_prompt_input.textChanged.connect(self._schedule_autosave)
+
+        # Test point - commands
+        self.source_cmd_input.textChanged.connect(self._schedule_autosave)
+        self.operate_cmd_input.textChanged.connect(self._schedule_autosave)
+        self.measure_cmd_input.textChanged.connect(self._schedule_autosave)
+
+        # Test point - pass/fail
+        self.operational_check_input.textChanged.connect(self._schedule_autosave)
+        self.pass_fail_prompt_input.textChanged.connect(self._schedule_autosave)
+        self.pass_fail_image_input.textChanged.connect(self._schedule_autosave)
+        self.pass_fail_min_input.valueChanged.connect(self._schedule_autosave)
+        self.pass_fail_max_input.valueChanged.connect(self._schedule_autosave)
+        self.pass_fail_gt_input.valueChanged.connect(self._schedule_autosave)
+        self.pass_fail_lt_input.valueChanged.connect(self._schedule_autosave)
+        self.pass_fail_range_unit.currentTextChanged.connect(self._schedule_autosave)
+
+        # Test point - formula
+        self.formula_input.textChanged.connect(self._schedule_autosave)
+
+        # Test point - excel
+        self.excel_sheet_input.textChanged.connect(self._schedule_autosave)
+        self.excel_cell_input.textChanged.connect(self._schedule_autosave)
+
+        # Test point - wiring
+        self.wiring_combo.currentTextChanged.connect(self._schedule_autosave)
+        self.operator_prompt_edit.textChanged.connect(self._schedule_autosave)
+
+        # Test point - DUT remote
+        self.dut_setup_cmd_combo.currentTextChanged.connect(self._schedule_autosave)
+        self.dut_setup_param_input.textChanged.connect(self._schedule_autosave)
+        self.dut_precheck_cmd_combo.currentTextChanged.connect(self._schedule_autosave)
+        self.dut_precheck_param_input.textChanged.connect(self._schedule_autosave)
+        self.dut_precheck_expected_input.textChanged.connect(self._schedule_autosave)
+        self.dut_precheck_prompt_input.textChanged.connect(self._schedule_autosave)
+        self.dut_precheck_parser_combo.currentTextChanged.connect(self._schedule_autosave)
+        self.dut_precheck_index_spin.valueChanged.connect(self._schedule_autosave)
+        self.dut_postread_cmd_combo.currentTextChanged.connect(self._schedule_autosave)
+        self.dut_postread_param_input.textChanged.connect(self._schedule_autosave)
+        self.dut_postread_parser_combo.currentTextChanged.connect(self._schedule_autosave)
+        self.dut_postread_index_input.valueChanged.connect(self._schedule_autosave)
+
+        logger.debug("Auto-save signals connected")
 
     def _on_test_type_changed(self, index: int):
         """Show/hide tabs based on selected test type."""
@@ -4443,6 +4547,82 @@ class ProceduresTab(QWidget):
         except Exception as e:
             logger.error(f"Failed to save test point: {e}")
             QMessageBox.critical(self, "Save Error", f"Failed to save test point:\n{e}")
+
+    def _schedule_autosave(self):
+        """Schedule an auto-save - restarts timer on each change (debounce pattern)."""
+        # Stop any existing timer
+        self._autosave_timer.stop()
+        # Start new timer - saves 2 seconds after last change
+        self._autosave_timer.start(2000)  # 2000 ms = 2 seconds
+        # Update status
+        self.autosave_status.setText("Unsaved changes...")
+        self.autosave_status.setStyleSheet("color: #ff9900; font-size: 11px; padding: 0 10px;")
+
+    def _autosave(self):
+        """Perform auto-save silently without popup messages."""
+        # Update status to show saving
+        self.autosave_status.setText("Saving...")
+        self.autosave_status.setStyleSheet("color: #888; font-size: 11px; padding: 0 10px;")
+
+        # Determine what to save based on current selection
+        current = self.structure_tree.currentItem()
+        if not current:
+            # No selection - try to save procedure info only
+            self._save_procedure_info_only()
+            self.autosave_status.setText("✓ Saved")
+            self.autosave_status.setStyleSheet("color: #00aa00; font-size: 11px; padding: 0 10px;")
+            return
+
+        data = current.data(0, Qt.ItemDataRole.UserRole)
+        if not data:
+            self.autosave_status.setText("")
+            return
+
+        item_type = data[0]
+
+        # Save based on type
+        if item_type == "testpoint":
+            # Save test point
+            self._save_current_testpoint(silent=True)
+        elif item_type == "section":
+            # Save section
+            self._save_current_section(silent=True)
+
+        # Always save procedure info (name, target, etc.)
+        self._save_procedure_info_only()
+
+        # Update status to show saved
+        self.autosave_status.setText("✓ All changes saved")
+        self.autosave_status.setStyleSheet("color: #00aa00; font-size: 11px; padding: 0 10px;")
+
+        # Optional: Auto-export to CSP
+        # Uncomment the following lines if you want CSP to auto-export on every save
+        # if self._current_procedure_id:
+        #     self._export_procedure_to_csp(silent=True)
+
+        logger.debug("Auto-save completed")
+
+    def _save_procedure_info_only(self):
+        """Save only procedure-level info (name, version, target) without sections/test points."""
+        if not self._current_procedure_id:
+            return
+
+        db = get_db()
+        if not db.is_connected:
+            return
+
+        try:
+            with db.session() as session:
+                procedure = session.query(Procedure).filter(
+                    Procedure.id == self._current_procedure_id
+                ).first()
+                if procedure:
+                    procedure.name = self.name_input.text().strip() or "Unnamed Procedure"
+                    procedure.target_make = self.target_make_input.text().strip() or None
+                    procedure.target_model = self.target_model_input.text().strip() or None
+                    logger.debug(f"Auto-saved procedure info: {procedure.name}")
+        except Exception as e:
+            logger.error(f"Failed to auto-save procedure info: {e}")
 
     def _on_remove_item(self):
         """Remove selected section or test point."""
